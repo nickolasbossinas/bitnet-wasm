@@ -163,31 +163,26 @@ void model_free(model_t *model) {
 
 void rms_norm(float *out, const float *x, const float *weight,
               int32_t dim, float eps) {
-    /* Compute sum of squares */
     float ss = 0.0f;
     for (int32_t i = 0; i < dim; i++) {
         ss += x[i] * x[i];
     }
     ss = 1.0f / sqrtf(ss / dim + eps);
-    /* Normalize and scale */
     for (int32_t i = 0; i < dim; i++) {
         out[i] = x[i] * ss * weight[i];
     }
 }
 
 void softmax(float *x, int32_t size) {
-    /* Find max for numerical stability */
     float max_val = x[0];
     for (int32_t i = 1; i < size; i++) {
         if (x[i] > max_val) max_val = x[i];
     }
-    /* Exp and sum */
     float sum = 0.0f;
     for (int32_t i = 0; i < size; i++) {
         x[i] = expf(x[i] - max_val);
         sum += x[i];
     }
-    /* Normalize */
     float inv = 1.0f / sum;
     for (int32_t i = 0; i < size; i++) {
         x[i] *= inv;
@@ -493,7 +488,7 @@ float *forward(model_t *model, int32_t token, int32_t pos) {
         /* Squared ReLU: max(0, gate)^2 * up */
         for (int32_t i = 0; i < inter; i++) {
             float g = model->hb[i];
-            g = (g > 0.0f) ? g * g : 0.0f;  /* relu2 */
+            g = (g > 0.0f) ? g * g : 0.0f;
             model->hb[i] = g * model->hb2[i];
         }
 
