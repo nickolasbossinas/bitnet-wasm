@@ -4,8 +4,6 @@
 
 Build custom WASM SIMD kernels for BitNet b1.58 (1.58-bit ternary LLM) inference in the browser. The target model is Microsoft's BitNet b1.58 2B4T (2 billion parameters, ternary weights {-1, 0, 1}).
 
-This is a standalone project. It will eventually integrate with the S2S (speech-to-speech) project at `C:\Users\nicko\Documents\S2S\git\s2s`, replacing the mock LLM (`services/llm.ts`) with real in-browser inference.
-
 ## Architecture Decisions
 
 - **Language**: C compiled to WASM via Emscripten (chosen over Rust/AssemblyScript for closest reference to bitnet.cpp)
@@ -57,7 +55,7 @@ result = swizzle(LUT, indices)      // single WASM SIMD instruction
 3. **Optimize TL1 SIMD kernel** — current implementation falls back to scalar inner loop for the LUT lookup since each activation pair has a different 16-byte LUT. Need to restructure for better SIMD utilization (e.g., process multiple output rows in parallel)
 4. **Add TL2 kernel** — 3 weights per index (1-bit sign + 4-bit index), more aggressive compression
 5. **Full inference pipeline** — model loading (GGUF), tokenization, attention, sampling
-6. **Web Worker integration** — following the same pattern as the S2S project's sherpa-worker.js
+6. **Web Worker integration** — parallelize GEMV across multiple threads via SharedArrayBuffer
 
 ## Build Instructions
 
