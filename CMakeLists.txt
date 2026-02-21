@@ -76,6 +76,50 @@ if(EMSCRIPTEN)
         COMMENT "Copying index.html to build directory"
     )
 
+    # =========================================
+    # WASM Inference build
+    # =========================================
+    add_executable(bitnet-inference
+        ${KERNEL_SOURCES}
+        ${INFERENCE_SOURCES}
+        src/wasm_api.c
+    )
+
+    target_link_options(bitnet-inference PRIVATE
+        # Exported C functions (callable from JS)
+        -sEXPORTED_FUNCTIONS=['_bitnet_init','_bitnet_generate','_bitnet_free','_malloc','_free']
+        -sEXPORTED_RUNTIME_METHODS=['ccall','cwrap','UTF8ToString','stringToNewUTF8','HEAPU8']
+
+        # Memory: 4GB max for full 30-layer model (~3.2 GB peak during loading)
+        -sINITIAL_MEMORY=256MB
+        -sALLOW_MEMORY_GROWTH=1
+        -sMAXIMUM_MEMORY=4GB
+
+        # Stack
+        -sSTACK_SIZE=2MB
+
+        # Output format
+        -sMODULARIZE=1
+        -sEXPORT_NAME='BitNetInference'
+
+        # Environment
+        "-sENVIRONMENT=web,worker"
+
+        # No main() function
+        --no-entry
+    )
+
+    # Copy inference web files to build dir
+    add_custom_command(TARGET bitnet-inference POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy
+            ${CMAKE_SOURCE_DIR}/web/worker.js
+            ${CMAKE_BINARY_DIR}/worker.js
+        COMMAND ${CMAKE_COMMAND} -E copy
+            ${CMAKE_SOURCE_DIR}/web/inference.html
+            ${CMAKE_BINARY_DIR}/inference.html
+        COMMENT "Copying inference web files to build directory"
+    )
+
 else()
     # =========================================
     # Native build (for testing without Emscripten)
@@ -98,4 +142,13 @@ else()
     # CLI generation tool
     add_executable(bitnet-cli ${KERNEL_SOURCES} ${INFERENCE_SOURCES} src/main.c)
     target_link_libraries(bitnet-cli m)
+
+    # Weight diagnostic tool
+    add_executable(diagnose_weights
+        ${KERNEL_SOURCES}
+        src/inference/gguf.c
+        src/inference/weight_loader.c
+        src/test/diagnose_weights.c
+    )
+    target_link_libraries(diagnose_weights m)
 endif()

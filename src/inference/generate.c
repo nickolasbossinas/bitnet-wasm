@@ -82,11 +82,13 @@ int generate(model_t *model, tokenizer_t *tok, const char *prompt,
 
         n_generated++;
 
-        /* Decode and emit token */
+        /* Decode and emit token (GPT-2 byte decode → raw bytes) */
         if (callback) {
-            const char *piece = tokenizer_decode_token(tok, next_token);
-            if (piece) {
-                callback(piece, next_token, user_data);
+            char piece_buf[256];
+            int32_t len = tokenizer_decode(tok, &next_token, 1,
+                                            piece_buf, sizeof(piece_buf));
+            if (len > 0) {
+                callback(piece_buf, next_token, user_data);
             }
         }
 
