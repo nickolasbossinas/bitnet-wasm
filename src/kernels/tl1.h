@@ -94,4 +94,32 @@ void tl1_gemv_simd(const tl1_weight_t *W,
                    const activation_t *x,
                    output_t *y);
 
+/*
+ * Pre-split int16 LUT into separate lo/hi byte tables for SIMD.
+ * Moves the deinterleave shuffle out of the GEMV hot loop into a
+ * one-time O(K) prepass. Call once after tl1_build_lut.
+ *
+ * lut:    int16 LUT from tl1_build_lut, [num_pairs * 16] entries
+ * lut_lo: output lo-byte table, [num_pairs * 16] bytes
+ * lut_hi: output hi-byte table, [num_pairs * 16] bytes
+ * No-op on non-WASM builds.
+ */
+void tl1_presplit_lut(const int16_t *lut, uint8_t *lut_lo, uint8_t *lut_hi,
+                      int32_t num_pairs);
+
+/*
+ * Fast TL1 GEMV using pre-allocated, pre-split LUT buffers.
+ * No internal memory allocation. Scale is pre-combined (w_scale * a_scale).
+ *
+ * lut:    original int16 LUT (used for scalar tail rows on WASM,
+ *         and full scalar fallback on non-WASM builds)
+ * lut_lo/lut_hi: pre-split byte tables from tl1_presplit_lut()
+ * scale:  combined weight_scale * activation_scale
+ * out:    float output buffer [W->M]
+ */
+void tl1_gemv_simd_fast(const tl1_weight_t *W,
+                         const int16_t *lut,
+                         const uint8_t *lut_lo, const uint8_t *lut_hi,
+                         float scale, float *out);
+
 #endif /* BITNET_TL1_H */

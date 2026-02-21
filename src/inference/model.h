@@ -31,6 +31,19 @@ typedef struct {
     float   rms_norm_eps;      /* 1e-5 */
 } model_config_t;
 
+/* GEMV scratch buffers (pre-allocated, reused across forward calls).
+ * Eliminates 840 malloc/free pairs per token (7 calls × 30 layers × 4 allocs).
+ * Also enables LUT caching when multiple projections share the same input. */
+typedef struct {
+    int8_t  *quant_buf;    /* [max_K] quantized activations */
+    int16_t *lut_buf;      /* [max_K/2 * 16] TL1 LUT */
+    uint8_t *lut_lo_buf;   /* [max_K/2 * 16] pre-split lo bytes */
+    uint8_t *lut_hi_buf;   /* [max_K/2 * 16] pre-split hi bytes */
+    float    act_scale;    /* current activation quantization scale */
+    int32_t  prepared_K;   /* K dimension of current preparation */
+    int32_t  max_K;        /* allocation size (max of hidden, intermediate) */
+} gemv_scratch_t;
+
 /* Per-layer weights */
 typedef struct {
     /* Ternary weights (TL1 packed for SIMD) */
@@ -75,6 +88,9 @@ typedef struct {
     float *hb;         /* [intermediate_size] FFN hidden */
     float *hb2;        /* [intermediate_size] FFN hidden 2 */
     float *logits;     /* [vocab_size] output logits */
+
+    /* GEMV scratch (eliminates per-call malloc in bitlinear) */
+    gemv_scratch_t scratch;
 } model_t;
 
 /*
@@ -121,8 +137,24 @@ void matmul_f32(float *out, const float *x, const float *W,
 /*
  * BitLinear: quantize activations -> TL1 GEMV -> scale output.
  * Wraps the existing optimized TL1 SIMD kernel.
+ * Legacy interface — allocates/frees per call. Used by benchmark.
  */
 void bitlinear(float *out, const float *x, const tl1_weight_t *W);
+
+/*
+ * Optimized bitlinear: two-phase interface for the forward pass.
+ *
+ * bitlinear_prepare: quantize activations + build/presplit LUT into
+ * model scratch buffers. Call once per unique input vector.
+ *
+ * bitlinear_run: execute GEMV using pre-built LUT. No allocation.
+ * Call for each weight matrix that shares the same prepared input.
+ *
+ * Example: Q, K, V projections share the same input after attn_norm,
+ * so prepare once + run 3 times (saves 2 quantize+LUT builds).
+ */
+void bitlinear_prepare(model_t *model, const float *x, int32_t K);
+void bitlinear_run(float *out, const tl1_weight_t *W, model_t *model);
 
 /*
  * Forward pass: process one token, update KV cache, return logits.

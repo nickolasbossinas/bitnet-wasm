@@ -6,6 +6,10 @@
 #include <math.h>
 #include <stdio.h>
 
+#ifdef __wasm_simd128__
+#include <wasm_simd128.h>
+#endif
+
 /* --- Config --- */
 
 void model_config_from_gguf(model_config_t *config, const gguf_context_t *gguf) {
@@ -66,6 +70,21 @@ int model_alloc(model_t *model) {
     model->layers = (layer_weights_t *)calloc(nl, sizeof(layer_weights_t));
     if (!model->layers) return -1;
 
+    /* GEMV scratch buffers — eliminates all malloc/free from forward pass */
+    int32_t max_K = (dim > inter) ? dim : inter;
+    int32_t max_pairs = max_K / 2;
+    model->scratch.max_K = max_K;
+    model->scratch.prepared_K = 0;
+    model->scratch.quant_buf  = (int8_t  *)malloc(max_K * sizeof(int8_t));
+    model->scratch.lut_buf    = (int16_t *)calloc(max_pairs * 16, sizeof(int16_t));
+    model->scratch.lut_lo_buf = (uint8_t *)malloc(max_pairs * 16);
+    model->scratch.lut_hi_buf = (uint8_t *)malloc(max_pairs * 16);
+    if (!model->scratch.quant_buf || !model->scratch.lut_buf ||
+        !model->scratch.lut_lo_buf || !model->scratch.lut_hi_buf) {
+        fprintf(stderr, "model: failed to allocate GEMV scratch buffers\n");
+        return -1;
+    }
+
     return 0;
 }
 
@@ -97,6 +116,13 @@ void model_free(model_t *model) {
 
     free(model->token_embedding);
     free(model->output_norm);
+
+    /* GEMV scratch buffers */
+    free(model->scratch.quant_buf);
+    free(model->scratch.lut_buf);
+    free(model->scratch.lut_lo_buf);
+    free(model->scratch.lut_hi_buf);
+
     memset(model, 0, sizeof(*model));
 }
 
@@ -138,6 +164,34 @@ void softmax(float *x, int32_t size) {
 void matmul_f32(float *out, const float *x, const float *W,
                 int32_t M, int32_t K) {
     /* out[i] = sum_j(W[i*K + j] * x[j]) */
+#ifdef __wasm_simd128__
+    /* SIMD: 8-wide f32 accumulation (2 × f32x4) → ~3-4x speedup.
+     * Critical for logits: 128256 rows × 2560 cols = 328M FMAs. */
+    for (int32_t i = 0; i < M; i++) {
+        const float *row = &W[i * K];
+        v128_t sum0 = wasm_f32x4_const(0, 0, 0, 0);
+        v128_t sum1 = wasm_f32x4_const(0, 0, 0, 0);
+        int32_t j;
+        for (j = 0; j + 8 <= K; j += 8) {
+            sum0 = wasm_f32x4_add(sum0, wasm_f32x4_mul(
+                wasm_v128_load(&row[j]),     wasm_v128_load(&x[j])));
+            sum1 = wasm_f32x4_add(sum1, wasm_f32x4_mul(
+                wasm_v128_load(&row[j + 4]), wasm_v128_load(&x[j + 4])));
+        }
+        sum0 = wasm_f32x4_add(sum0, sum1);
+        /* Horizontal sum of 4 f32 lanes */
+        v128_t hi = wasm_i64x2_shuffle(sum0, sum0, 1, 0);
+        sum0 = wasm_f32x4_add(sum0, hi);
+        v128_t hi2 = wasm_i32x4_shuffle(sum0, sum0, 1, 0, 3, 2);
+        sum0 = wasm_f32x4_add(sum0, hi2);
+        float sum = wasm_f32x4_extract_lane(sum0, 0);
+        /* Scalar tail */
+        for (; j < K; j++) {
+            sum += row[j] * x[j];
+        }
+        out[i] = sum;
+    }
+#else
     for (int32_t i = 0; i < M; i++) {
         float sum = 0.0f;
         const float *row = &W[i * K];
@@ -146,41 +200,50 @@ void matmul_f32(float *out, const float *x, const float *W,
         }
         out[i] = sum;
     }
+#endif
 }
 
 void rope_apply(float *q, float *k, int32_t n_heads, int32_t n_kv_heads,
                 int32_t head_dim, int32_t pos, float theta) {
     /*
      * RoPE: rotate pairs of dimensions using position-dependent frequencies.
-     * freq_i = 1 / (theta ^ (2i / head_dim))
-     * For each pair (x[2i], x[2i+1]):
-     *   x[2i]   = x[2i] * cos(freq) - x[2i+1] * sin(freq)
-     *   x[2i+1] = x[2i] * sin(freq) + x[2i+1] * cos(freq)
+     *
+     * Optimized: compute cos/sin once per dimension pair (head_dim/2 values),
+     * then apply to all heads. Reduces trig calls from
+     * head_dim/2 * (n_heads + n_kv_heads) to just head_dim/2.
+     * For BitNet 2B4T: 1600 powf+cosf+sinf → 64 each (25x reduction).
      */
+    int32_t half_dim = head_dim / 2;
+
+    /* Pre-compute cos/sin for this position (stack-allocated) */
+    float cos_cache[256], sin_cache[256];  /* head_dim/2 max (128/2=64) */
+
+    for (int32_t i = 0; i < half_dim; i++) {
+        float freq = 1.0f / powf(theta, (float)(i * 2) / (float)head_dim);
+        float angle = (float)pos * freq;
+        cos_cache[i] = cosf(angle);
+        sin_cache[i] = sinf(angle);
+    }
+
+    /* Apply to all Q heads */
     for (int32_t h = 0; h < n_heads; h++) {
         float *qh = &q[h * head_dim];
-        for (int32_t i = 0; i < head_dim; i += 2) {
-            float freq = 1.0f / powf(theta, (float)i / (float)head_dim);
-            float angle = (float)pos * freq;
-            float cos_a = cosf(angle);
-            float sin_a = sinf(angle);
-            float q0 = qh[i];
-            float q1 = qh[i + 1];
-            qh[i]     = q0 * cos_a - q1 * sin_a;
-            qh[i + 1] = q0 * sin_a + q1 * cos_a;
+        for (int32_t i = 0; i < half_dim; i++) {
+            float q0 = qh[i * 2];
+            float q1 = qh[i * 2 + 1];
+            qh[i * 2]     = q0 * cos_cache[i] - q1 * sin_cache[i];
+            qh[i * 2 + 1] = q0 * sin_cache[i] + q1 * cos_cache[i];
         }
     }
+
+    /* Apply to all K heads */
     for (int32_t h = 0; h < n_kv_heads; h++) {
         float *kh = &k[h * head_dim];
-        for (int32_t i = 0; i < head_dim; i += 2) {
-            float freq = 1.0f / powf(theta, (float)i / (float)head_dim);
-            float angle = (float)pos * freq;
-            float cos_a = cosf(angle);
-            float sin_a = sinf(angle);
-            float k0 = kh[i];
-            float k1 = kh[i + 1];
-            kh[i]     = k0 * cos_a - k1 * sin_a;
-            kh[i + 1] = k0 * sin_a + k1 * cos_a;
+        for (int32_t i = 0; i < half_dim; i++) {
+            float k0 = kh[i * 2];
+            float k1 = kh[i * 2 + 1];
+            kh[i * 2]     = k0 * cos_cache[i] - k1 * sin_cache[i];
+            kh[i * 2 + 1] = k0 * sin_cache[i] + k1 * cos_cache[i];
         }
     }
 }
@@ -188,13 +251,43 @@ void rope_apply(float *q, float *k, int32_t n_heads, int32_t n_kv_heads,
 void bitlinear(float *out, const float *x, const tl1_weight_t *W) {
     /*
      * BitLinear: ternary GEMV with activation quantization.
-     * Uses the existing optimized gemv_run() which handles:
-     *   1. Quantize float activations -> int8
-     *   2. Build TL1 LUT
-     *   3. TL1 SIMD GEMV
-     *   4. Scale output
+     * Legacy interface — allocates/frees per call. Used by benchmark.
      */
     gemv_run(KERNEL_TL1_SIMD, W, x, out, W->M, W->K);
+}
+
+void bitlinear_prepare(model_t *model, const float *x, int32_t K) {
+    /*
+     * Phase 1: quantize activations + build LUT + pre-split for SIMD.
+     * Results stored in model->scratch for subsequent bitlinear_run calls.
+     * Call once per unique input vector.
+     */
+    gemv_scratch_t *s = &model->scratch;
+
+    /* Quantize float activations to int8 */
+    quantize_activations(x, K, s->quant_buf, &s->act_scale);
+
+    /* Build TL1 lookup table */
+    int32_t num_pairs = K / 2;
+    tl1_build_lut(s->lut_buf, s->quant_buf, K);
+
+    /* Pre-split LUT into lo/hi byte tables for SIMD */
+    tl1_presplit_lut(s->lut_buf, s->lut_lo_buf, s->lut_hi_buf, num_pairs);
+
+    s->prepared_K = K;
+}
+
+void bitlinear_run(float *out, const tl1_weight_t *W, model_t *model) {
+    /*
+     * Phase 2: execute GEMV using pre-built LUT from bitlinear_prepare.
+     * Zero allocation. Can be called multiple times with different weight
+     * matrices that share the same input vector.
+     */
+    gemv_scratch_t *s = &model->scratch;
+    float scale = W->scale * s->act_scale;
+
+    tl1_gemv_simd_fast(W, s->lut_buf, s->lut_lo_buf, s->lut_hi_buf,
+                        scale, out);
 }
 
 /* --- Forward pass --- */
@@ -230,10 +323,11 @@ float *forward(model_t *model, int32_t token, int32_t pos) {
         /* Pre-norm */
         rms_norm(model->xb, x, lw->attn_norm, dim, c->rms_norm_eps);
 
-        /* Q, K, V projections (ternary GEMV) */
-        bitlinear(model->q, model->xb, &lw->attn_q);
-        bitlinear(model->k, model->xb, &lw->attn_k);
-        bitlinear(model->v, model->xb, &lw->attn_v);
+        /* Q, K, V projections — shared input, prepare LUT once */
+        bitlinear_prepare(model, model->xb, dim);
+        bitlinear_run(model->q, &lw->attn_q, model);
+        bitlinear_run(model->k, &lw->attn_k, model);
+        bitlinear_run(model->v, &lw->attn_v, model);
 
         /* Apply RoPE */
         rope_apply(model->q, model->k, n_heads, n_kv_heads,
@@ -284,8 +378,9 @@ float *forward(model_t *model, int32_t token, int32_t pos) {
         /* attn_sub_norm is [hidden_size], applied over full concatenated output */
         rms_norm(model->xb, model->xb, lw->attn_sub_norm, dim, c->rms_norm_eps);
 
-        /* Output projection + residual */
-        bitlinear(model->xb2, model->xb, &lw->attn_o);
+        /* Output projection + residual (different input after attention) */
+        bitlinear_prepare(model, model->xb, dim);
+        bitlinear_run(model->xb2, &lw->attn_o, model);
         for (int32_t i = 0; i < dim; i++) {
             x[i] += model->xb2[i];
         }
@@ -295,9 +390,10 @@ float *forward(model_t *model, int32_t token, int32_t pos) {
         /* Pre-norm */
         rms_norm(model->xb, x, lw->ffn_norm, dim, c->rms_norm_eps);
 
-        /* Gate and up projections */
-        bitlinear(model->hb, model->xb, &lw->ffn_gate);
-        bitlinear(model->hb2, model->xb, &lw->ffn_up);
+        /* Gate and up projections — shared input, prepare LUT once */
+        bitlinear_prepare(model, model->xb, dim);
+        bitlinear_run(model->hb, &lw->ffn_gate, model);
+        bitlinear_run(model->hb2, &lw->ffn_up, model);
 
         /* Squared ReLU: max(0, gate)^2 * up */
         for (int32_t i = 0; i < inter; i++) {
@@ -309,8 +405,9 @@ float *forward(model_t *model, int32_t token, int32_t pos) {
         /* SubLN: RMSNorm before down projection */
         rms_norm(model->hb2, model->hb, lw->ffn_sub_norm, inter, c->rms_norm_eps);
 
-        /* Down projection + residual */
-        bitlinear(model->xb, model->hb2, &lw->ffn_down);
+        /* Down projection + residual (different input, K=intermediate) */
+        bitlinear_prepare(model, model->hb2, inter);
+        bitlinear_run(model->xb, &lw->ffn_down, model);
         for (int32_t i = 0; i < dim; i++) {
             x[i] += model->xb[i];
         }

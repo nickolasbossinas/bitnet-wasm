@@ -311,13 +311,188 @@ void tl1_gemv_simd(const tl1_weight_t *W,
     free(lut_hi_bytes);
 }
 
+/* --- Pre-split LUT --- */
+
+void tl1_presplit_lut(const int16_t *lut, uint8_t *lut_lo, uint8_t *lut_hi,
+                      int32_t num_pairs) {
+    for (int32_t p = 0; p < num_pairs; p++) {
+        v128_t raw0 = wasm_v128_load(&lut[p * 16]);
+        v128_t raw1 = wasm_v128_load(&lut[p * 16 + 8]);
+        wasm_v128_store(&lut_lo[p * 16], wasm_i8x16_shuffle(raw0, raw1,
+            0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30));
+        wasm_v128_store(&lut_hi[p * 16], wasm_i8x16_shuffle(raw0, raw1,
+            1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31));
+    }
+}
+
+/* --- Fast SIMD GEMV (no internal allocation) --- */
+
+void tl1_gemv_simd_fast(const tl1_weight_t *W,
+                         const int16_t *lut,
+                         const uint8_t *lut_lo, const uint8_t *lut_hi,
+                         float scale, float *out) {
+    int32_t M = W->M;
+    int32_t K = W->K;
+    int32_t num_pairs = K / 2;
+    int32_t bytes_per_row = (num_pairs + 1) / 2;
+    int32_t full_bytes = num_pairs / 2;
+
+    const uint8_t *col = W->indices_col;
+    int32_t i;
+    for (i = 0; i + 16 <= M; i += 16) {
+        v128_t acc0 = simd_zero();
+        v128_t acc1 = simd_zero();
+        v128_t acc2 = simd_zero();
+        v128_t acc3 = simd_zero();
+
+        for (int32_t b_outer = 0; b_outer < full_bytes; b_outer += 64) {
+            int32_t b_end = b_outer + 64;
+            if (b_end > full_bytes) b_end = full_bytes;
+
+            v128_t acc16_lo = simd_zero();
+            v128_t acc16_hi = simd_zero();
+
+            for (int32_t b = b_outer; b < b_end; b++) {
+                v128_t packed = wasm_v128_load(&col[b * M + i]);
+
+                /* Even pair (low nibble) */
+                v128_t idx_even = simd_extract_low_nibbles(packed);
+                int32_t ep = b * 2;
+
+                v128_t lo = wasm_v128_load(&lut_lo[ep * 16]);
+                v128_t hi = wasm_v128_load(&lut_hi[ep * 16]);
+
+                v128_t val_lo = wasm_i8x16_swizzle(lo, idx_even);
+                v128_t val_hi = wasm_i8x16_swizzle(hi, idx_even);
+
+                acc16_lo = wasm_i16x8_add(acc16_lo, wasm_i8x16_shuffle(
+                    val_lo, val_hi,
+                    0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23));
+                acc16_hi = wasm_i16x8_add(acc16_hi, wasm_i8x16_shuffle(
+                    val_lo, val_hi,
+                    8, 24, 9, 25, 10, 26, 11, 27, 12, 28, 13, 29, 14, 30, 15, 31));
+
+                /* Odd pair (high nibble) */
+                v128_t idx_odd = simd_extract_high_nibbles(packed);
+                int32_t op = b * 2 + 1;
+
+                v128_t lo2 = wasm_v128_load(&lut_lo[op * 16]);
+                v128_t hi2 = wasm_v128_load(&lut_hi[op * 16]);
+
+                v128_t val_lo2 = wasm_i8x16_swizzle(lo2, idx_odd);
+                v128_t val_hi2 = wasm_i8x16_swizzle(hi2, idx_odd);
+
+                acc16_lo = wasm_i16x8_add(acc16_lo, wasm_i8x16_shuffle(
+                    val_lo2, val_hi2,
+                    0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23));
+                acc16_hi = wasm_i16x8_add(acc16_hi, wasm_i8x16_shuffle(
+                    val_lo2, val_hi2,
+                    8, 24, 9, 25, 10, 26, 11, 27, 12, 28, 13, 29, 14, 30, 15, 31));
+            }
+
+            acc0 = wasm_i32x4_add(acc0, wasm_i32x4_extend_low_i16x8(acc16_lo));
+            acc1 = wasm_i32x4_add(acc1, wasm_i32x4_extend_high_i16x8(acc16_lo));
+            acc2 = wasm_i32x4_add(acc2, wasm_i32x4_extend_low_i16x8(acc16_hi));
+            acc3 = wasm_i32x4_add(acc3, wasm_i32x4_extend_high_i16x8(acc16_hi));
+        }
+
+        /* Handle last byte if num_pairs is odd */
+        if (num_pairs & 1) {
+            int32_t b = full_bytes;
+            v128_t packed = wasm_v128_load(&col[b * M + i]);
+            v128_t idx_even = simd_extract_low_nibbles(packed);
+            int32_t ep = b * 2;
+
+            v128_t lo = wasm_v128_load(&lut_lo[ep * 16]);
+            v128_t hi = wasm_v128_load(&lut_hi[ep * 16]);
+
+            v128_t val_lo = wasm_i8x16_swizzle(lo, idx_even);
+            v128_t val_hi = wasm_i8x16_swizzle(hi, idx_even);
+
+            v128_t pairs_0_7 = wasm_i8x16_shuffle(val_lo, val_hi,
+                0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23);
+            v128_t pairs_8_15 = wasm_i8x16_shuffle(val_lo, val_hi,
+                8, 24, 9, 25, 10, 26, 11, 27, 12, 28, 13, 29, 14, 30, 15, 31);
+
+            acc0 = wasm_i32x4_add(acc0, wasm_i32x4_extend_low_i16x8(pairs_0_7));
+            acc1 = wasm_i32x4_add(acc1, wasm_i32x4_extend_high_i16x8(pairs_0_7));
+            acc2 = wasm_i32x4_add(acc2, wasm_i32x4_extend_low_i16x8(pairs_8_15));
+            acc3 = wasm_i32x4_add(acc3, wasm_i32x4_extend_high_i16x8(pairs_8_15));
+        }
+
+        /* Scale and store 16 results */
+        v128_t sv = wasm_f32x4_splat(scale);
+        wasm_v128_store(&out[i],
+            wasm_f32x4_mul(wasm_f32x4_convert_i32x4(acc0), sv));
+        wasm_v128_store(&out[i + 4],
+            wasm_f32x4_mul(wasm_f32x4_convert_i32x4(acc1), sv));
+        wasm_v128_store(&out[i + 8],
+            wasm_f32x4_mul(wasm_f32x4_convert_i32x4(acc2), sv));
+        wasm_v128_store(&out[i + 12],
+            wasm_f32x4_mul(wasm_f32x4_convert_i32x4(acc3), sv));
+    }
+
+    /* Handle remaining rows (< 16) with scalar fallback */
+    for (; i < M; i++) {
+        int32_t acc = 0;
+        const uint8_t *row_indices = &W->indices[i * bytes_per_row];
+
+        for (int32_t b = 0; b < full_bytes; b++) {
+            uint8_t packed = row_indices[b];
+            acc += (int32_t)lut[b * 32 + (packed & 0x0F)]
+                 + (int32_t)lut[b * 32 + 16 + (packed >> 4)];
+        }
+        if (num_pairs & 1) {
+            acc += (int32_t)lut[full_bytes * 32 + (row_indices[full_bytes] & 0x0F)];
+        }
+
+        out[i] = (float)acc * scale;
+    }
+}
+
 #else
+
+/* Non-WASM scalar fallbacks */
+
+void tl1_presplit_lut(const int16_t *lut, uint8_t *lut_lo, uint8_t *lut_hi,
+                      int32_t num_pairs) {
+    (void)lut; (void)lut_lo; (void)lut_hi; (void)num_pairs;
+}
 
 void tl1_gemv_simd(const tl1_weight_t *W,
                    const int16_t *lut,
                    const activation_t *x,
                    output_t *y) {
     tl1_gemv_scalar(W, lut, x, y);
+}
+
+void tl1_gemv_simd_fast(const tl1_weight_t *W,
+                         const int16_t *lut,
+                         const uint8_t *lut_lo, const uint8_t *lut_hi,
+                         float scale, float *out) {
+    /* Scalar fallback uses original int16 LUT */
+    (void)lut_lo; (void)lut_hi;
+    int32_t M = W->M;
+    int32_t K = W->K;
+    int32_t num_pairs = K / 2;
+    int32_t bytes_per_row = (num_pairs + 1) / 2;
+    int32_t full_bytes = num_pairs / 2;
+
+    for (int32_t i = 0; i < M; i++) {
+        int32_t acc = 0;
+        const uint8_t *row_indices = &W->indices[i * bytes_per_row];
+
+        for (int32_t b = 0; b < full_bytes; b++) {
+            uint8_t packed = row_indices[b];
+            acc += (int32_t)lut[b * 32 + (packed & 0x0F)]
+                 + (int32_t)lut[b * 32 + 16 + (packed >> 4)];
+        }
+        if (num_pairs & 1) {
+            acc += (int32_t)lut[full_bytes * 32 + (row_indices[full_bytes] & 0x0F)];
+        }
+
+        out[i] = (float)acc * scale;
+    }
 }
 
 #endif /* __wasm_simd128__ */
