@@ -31,6 +31,10 @@ static void execute_work(work_item_t *w) {
         matmul_f32_range(w->out, w->x, w->W_f32, w->K,
                           w->row_start, w->row_end);
         break;
+    case WORK_MATMUL_F16F32:
+        matmul_f16f32_range(w->out, w->x, w->W_f16, w->K,
+                             w->row_start, w->row_end);
+        break;
     default:
         break;
     }
@@ -188,6 +192,30 @@ void thread_pool_matmul(thread_pool_t *pool,
     pthread_barrier_wait(&pool->barrier_done);
 }
 
+void thread_pool_matmul_f16(thread_pool_t *pool,
+                             float *out, const float *x, const uint16_t *W,
+                             int32_t M, int32_t K) {
+    int32_t n = pool->n_threads;
+    int32_t total = n + 1;
+
+    for (int32_t i = 0; i < n; i++) {
+        int32_t rs, re;
+        split_rows(M, total, i, &rs, &re);
+        pool->work[i] = (work_item_t){
+            .type = WORK_MATMUL_F16F32,
+            .row_start = rs, .row_end = re,
+            .x = x, .W_f16 = W, .K = K, .out = out
+        };
+    }
+
+    int32_t main_start, main_end;
+    split_rows(M, total, n, &main_start, &main_end);
+
+    pthread_barrier_wait(&pool->barrier_start);
+    matmul_f16f32_range(out, x, W, K, main_start, main_end);
+    pthread_barrier_wait(&pool->barrier_done);
+}
+
 #else /* !BITNET_THREADED */
 
 /* Non-threaded stubs — call range functions directly (single-threaded) */
@@ -217,6 +245,13 @@ void thread_pool_matmul(thread_pool_t *pool,
                         int32_t M, int32_t K) {
     (void)pool;
     matmul_f32_range(out, x, W, K, 0, M);
+}
+
+void thread_pool_matmul_f16(thread_pool_t *pool,
+                             float *out, const float *x, const uint16_t *W,
+                             int32_t M, int32_t K) {
+    (void)pool;
+    matmul_f16f32_range(out, x, W, K, 0, M);
 }
 
 #endif /* BITNET_THREADED */

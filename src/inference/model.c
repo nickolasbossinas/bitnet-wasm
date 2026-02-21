@@ -2,6 +2,7 @@
 #include "thread_pool.h"
 #include "../kernels/gemv.h"
 #include "../kernels/tl1.h"
+#include "../inference/weight_loader.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -9,6 +10,37 @@
 
 #ifdef __wasm_simd128__
 #include <wasm_simd128.h>
+
+/*
+ * SIMD F16 -> F32 conversion (4 values at a time).
+ *
+ * Uses the "magic number" trick: for normal F16 values,
+ *   f32_bits = ((h & 0x7FFF) << 13) + 0x38000000
+ * handles exponent bias adjustment (F16 bias=15 -> F32 bias=127, diff=112).
+ * Zero and sign bits handled separately.
+ */
+static inline v128_t f16x4_to_f32x4(const uint16_t *p) {
+    /* Load 4 u16, zero-extend to u32x4 */
+    v128_t h = wasm_u32x4_load16x4(p);
+
+    /* Extract and position sign bit */
+    v128_t sign = wasm_i32x4_shl(
+        wasm_v128_and(h, wasm_i32x4_const(0x8000, 0x8000, 0x8000, 0x8000)), 16);
+
+    /* Magnitude: shift mantissa+exponent, add exponent bias */
+    v128_t mag = wasm_v128_and(h, wasm_i32x4_const(0x7FFF, 0x7FFF, 0x7FFF, 0x7FFF));
+    mag = wasm_i32x4_add(wasm_i32x4_shl(mag, 13),
+                          wasm_i32x4_const(0x38000000, 0x38000000,
+                                           0x38000000, 0x38000000));
+
+    /* Handle zeros: if h & 0x7FFF == 0, result should be ±0 (not 2^-112) */
+    v128_t is_zero = wasm_i32x4_eq(
+        wasm_v128_and(h, wasm_i32x4_const(0x7FFF, 0x7FFF, 0x7FFF, 0x7FFF)),
+        wasm_i32x4_const(0, 0, 0, 0));
+    mag = wasm_v128_andnot(mag, is_zero);  /* zero out mag where input was zero */
+
+    return wasm_v128_or(sign, mag);
+}
 #endif
 
 /* --- Config --- */
@@ -205,6 +237,56 @@ void matmul_f32(float *out, const float *x, const float *W,
     matmul_f32_range(out, x, W, K, 0, M);
 }
 
+/*
+ * F16 x F32 matmul: out[i] = W_f16[i,:] · x for rows [row_start, row_end).
+ * W is stored as uint16_t (F16). Converts to F32 on-the-fly during multiply.
+ * Halves memory bandwidth vs F32 matmul — critical for logits (128K x 2560).
+ */
+void matmul_f16f32_range(float *out, const float *x, const uint16_t *W,
+                          int32_t K, int32_t row_start, int32_t row_end) {
+#ifdef __wasm_simd128__
+    for (int32_t i = row_start; i < row_end; i++) {
+        const uint16_t *row = &W[i * K];
+        v128_t sum0 = wasm_f32x4_const(0, 0, 0, 0);
+        v128_t sum1 = wasm_f32x4_const(0, 0, 0, 0);
+        int32_t j;
+        for (j = 0; j + 8 <= K; j += 8) {
+            /* Convert 8 F16 weights to 2 x f32x4, multiply by x, accumulate */
+            v128_t w0 = f16x4_to_f32x4(&row[j]);
+            v128_t w1 = f16x4_to_f32x4(&row[j + 4]);
+            sum0 = wasm_f32x4_add(sum0, wasm_f32x4_mul(w0, wasm_v128_load(&x[j])));
+            sum1 = wasm_f32x4_add(sum1, wasm_f32x4_mul(w1, wasm_v128_load(&x[j + 4])));
+        }
+        sum0 = wasm_f32x4_add(sum0, sum1);
+        /* Horizontal sum */
+        v128_t hi = wasm_i64x2_shuffle(sum0, sum0, 1, 0);
+        sum0 = wasm_f32x4_add(sum0, hi);
+        v128_t hi2 = wasm_i32x4_shuffle(sum0, sum0, 1, 0, 3, 2);
+        sum0 = wasm_f32x4_add(sum0, hi2);
+        float sum = wasm_f32x4_extract_lane(sum0, 0);
+        /* Scalar tail */
+        for (; j < K; j++) {
+            sum += f16_to_f32(row[j]) * x[j];
+        }
+        out[i] = sum;
+    }
+#else
+    for (int32_t i = row_start; i < row_end; i++) {
+        float sum = 0.0f;
+        const uint16_t *row = &W[i * K];
+        for (int32_t j = 0; j < K; j++) {
+            sum += f16_to_f32(row[j]) * x[j];
+        }
+        out[i] = sum;
+    }
+#endif
+}
+
+void matmul_f16f32(float *out, const float *x, const uint16_t *W,
+                    int32_t M, int32_t K) {
+    matmul_f16f32_range(out, x, W, K, 0, M);
+}
+
 void rope_apply(float *q, float *k, int32_t n_heads, int32_t n_kv_heads,
                 int32_t head_dim, int32_t pos, float theta) {
     /*
@@ -319,8 +401,13 @@ float *forward(model_t *model, int32_t token, int32_t pos) {
 
     float *x = model->x;
 
-    /* Token embedding lookup */
-    memcpy(x, &model->token_embedding[token * dim], dim * sizeof(float));
+    /* Token embedding lookup (F16 -> F32 conversion) */
+    {
+        const uint16_t *emb_row = &model->token_embedding[token * dim];
+        for (int32_t i = 0; i < dim; i++) {
+            x[i] = f16_to_f32(emb_row[i]);
+        }
+    }
 
     /* Process each layer */
     for (int32_t l = 0; l < c->n_layers; l++) {
@@ -424,12 +511,12 @@ float *forward(model_t *model, int32_t token, int32_t pos) {
     /* Final RMSNorm */
     rms_norm(x, x, model->output_norm, dim, c->rms_norm_eps);
 
-    /* Output logits: x @ embedding^T (tied weights) */
+    /* Output logits: x @ embedding^T (tied F16 weights, halves BW) */
     if (model->pool && model->pool->n_threads > 0) {
-        thread_pool_matmul(model->pool, model->logits, x,
-                            model->token_embedding, c->vocab_size, dim);
+        thread_pool_matmul_f16(model->pool, model->logits, x,
+                                model->token_embedding, c->vocab_size, dim);
     } else {
-        matmul_f32(model->logits, x, model->token_embedding, c->vocab_size, dim);
+        matmul_f16f32(model->logits, x, model->token_embedding, c->vocab_size, dim);
     }
 
     return model->logits;

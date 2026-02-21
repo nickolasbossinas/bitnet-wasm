@@ -25,6 +25,18 @@
 #define TEST_PASS  0
 #define TEST_FAIL  1
 
+/* Simple F32 -> F16 conversion for test data */
+static uint16_t f32_to_f16(float f) {
+    uint32_t bits;
+    memcpy(&bits, &f, 4);
+    uint32_t sign = (bits >> 16) & 0x8000;
+    int32_t exp = ((bits >> 23) & 0xFF) - 127 + 15;
+    uint32_t mant = (bits >> 13) & 0x3FF;
+    if (exp <= 0) return (uint16_t)sign;       /* flush to zero */
+    if (exp >= 31) return (uint16_t)(sign | 0x7C00); /* clamp to inf */
+    return (uint16_t)(sign | (exp << 10) | mant);
+}
+
 static int tests_run = 0;
 static int tests_passed = 0;
 
@@ -272,8 +284,8 @@ static int test_forward_pass(void) {
         return TEST_FAIL;
     }
 
-    /* Allocate and fill token embedding with random data */
-    model.token_embedding = (float *)calloc(vocab * dim, sizeof(float));
+    /* Allocate and fill token embedding with random data (F16) */
+    model.token_embedding = (uint16_t *)calloc(vocab * dim, sizeof(uint16_t));
     model.output_norm = (float *)calloc(dim, sizeof(float));
     if (!model.token_embedding || !model.output_norm) {
         model_free(&model);
@@ -281,7 +293,7 @@ static int test_forward_pass(void) {
     }
 
     for (int i = 0; i < vocab * dim; i++) {
-        model.token_embedding[i] = test_rand_float() * 0.1f;
+        model.token_embedding[i] = f32_to_f16(test_rand_float() * 0.1f);
     }
     for (int i = 0; i < dim; i++) {
         model.output_norm[i] = 1.0f + test_rand_float() * 0.01f;

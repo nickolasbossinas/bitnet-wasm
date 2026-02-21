@@ -158,6 +158,39 @@ static float *load_f16_as_f32(const gguf_context_t *gguf,
     return dst;
 }
 
+/* --- Helper: load F16 tensor as raw uint16_t (no conversion) --- */
+
+static uint16_t *load_f16_raw(const gguf_context_t *gguf,
+                               const uint8_t *file_data,
+                               const char *name,
+                               int64_t expected_elements) {
+    gguf_tensor_info_t *t = gguf_find_tensor(gguf, name);
+    if (!t) {
+        fprintf(stderr, "weight_loader: tensor '%s' not found\n", name);
+        return NULL;
+    }
+    if (t->type != GGML_TYPE_F16) {
+        fprintf(stderr, "weight_loader: tensor '%s' is type %s, expected F16\n",
+                name, ggml_type_name(t->type));
+        return NULL;
+    }
+
+    int64_t n_elements = 1;
+    for (int d = 0; d < t->n_dims; d++) n_elements *= t->dims[d];
+
+    if (expected_elements > 0 && n_elements != expected_elements) {
+        fprintf(stderr, "weight_loader: tensor '%s' has %lld elements, expected %lld\n",
+                name, (long long)n_elements, (long long)expected_elements);
+        return NULL;
+    }
+
+    const uint16_t *src = (const uint16_t *)gguf_tensor_data(gguf, t, file_data);
+    uint16_t *dst = (uint16_t *)malloc(n_elements * sizeof(uint16_t));
+    if (!dst) return NULL;
+    memcpy(dst, src, n_elements * sizeof(uint16_t));
+    return dst;
+}
+
 /* --- Helper: load I2_S ternary tensor into TL1 format --- */
 
 static int load_tl1_weight(tl1_weight_t *w,
@@ -228,13 +261,13 @@ int model_load_weights(model_t *model, const gguf_context_t *gguf,
     fprintf(stderr, "weight_loader: loading %d/%d layers (dim=%d, inter=%d, kv_dim=%d)\n",
             n_layers, c->n_layers, dim, inter, kv_dim);
 
-    /* Load token embedding (F16 -> F32) */
+    /* Load token embedding as raw F16 (halves memory, 2x faster logits matmul) */
     int64_t emb_size = (int64_t)c->vocab_size * dim;
-    model->token_embedding = load_f16_as_f32(gguf, file_data,
-                                              "token_embd.weight", emb_size);
+    model->token_embedding = load_f16_raw(gguf, file_data,
+                                           "token_embd.weight", emb_size);
     if (!model->token_embedding) return -1;
-    fprintf(stderr, "weight_loader: loaded token_embd.weight (%.1f MB)\n",
-            emb_size * 4.0f / (1024.0f * 1024.0f));
+    fprintf(stderr, "weight_loader: loaded token_embd.weight F16 (%.1f MB)\n",
+            emb_size * 2.0f / (1024.0f * 1024.0f));
 
     /* Load output norm (F32) */
     model->output_norm = load_f32_tensor(gguf, file_data,

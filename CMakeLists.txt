@@ -92,7 +92,7 @@ if(EMSCRIPTEN)
 
     target_link_options(bitnet-inference PRIVATE
         # Exported C functions (callable from JS)
-        -sEXPORTED_FUNCTIONS=['_bitnet_init','_bitnet_generate','_bitnet_free','_malloc','_free']
+        -sEXPORTED_FUNCTIONS=['_bitnet_init','_bitnet_generate','_bitnet_set_threads','_bitnet_free','_malloc','_free']
         -sEXPORTED_RUNTIME_METHODS=['ccall','cwrap','UTF8ToString','stringToNewUTF8','HEAPU8']
 
         # Memory: 4GB max for full 30-layer model (~3.2 GB peak during loading)

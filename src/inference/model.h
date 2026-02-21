@@ -69,7 +69,7 @@ typedef struct {
     model_config_t  config;
 
     /* Global weights */
-    float          *token_embedding;  /* [vocab_size * hidden_size] */
+    uint16_t       *token_embedding;  /* [vocab_size * hidden_size] F16 */
     float          *output_norm;      /* [hidden_size] */
     /* output projection is tied to token_embedding */
 
@@ -146,6 +146,21 @@ void matmul_f32(float *out, const float *x, const float *W,
  */
 void matmul_f32_range(float *out, const float *x, const float *W,
                       int32_t K, int32_t row_start, int32_t row_end);
+
+/*
+ * F16->F32 conversion (portable, no hardware FP16 required).
+ */
+float f16_to_f32(uint16_t h);
+
+/*
+ * F16 x F32 matrix-vector multiply: out[M] = W_f16[M,K] * x[K]
+ * W is row-major F16 (uint16_t). x and out are F32.
+ * Used for logits with F16 token embedding (halves BW vs F32).
+ */
+void matmul_f16f32(float *out, const float *x, const uint16_t *W,
+                    int32_t M, int32_t K);
+void matmul_f16f32_range(float *out, const float *x, const uint16_t *W,
+                          int32_t K, int32_t row_start, int32_t row_end);
 
 /*
  * BitLinear: quantize activations -> TL1 GEMV -> scale output.

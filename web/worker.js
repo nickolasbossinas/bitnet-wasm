@@ -103,11 +103,31 @@ function runGenerate(prompt, maxTokens, temperature, topP, seed, repPenalty) {
     }
 }
 
+function setThreads(nThreads) {
+    try {
+        var result = Module._bitnet_set_threads(nThreads);
+        self.postMessage({
+            type: 'threads_set',
+            success: result === 0,
+            n_threads: nThreads
+        });
+    } catch (e) {
+        self.postMessage({
+            type: 'threads_set',
+            success: false,
+            error: e.message
+        });
+    }
+}
+
 self.onmessage = function(e) {
     var msg = e.data;
     switch (msg.type) {
         case 'load':
             loadModel(msg.buffer, msg.n_layers || -1, msg.n_threads || 0);
+            break;
+        case 'set_threads':
+            setThreads(msg.n_threads || 0);
             break;
         case 'generate':
             runGenerate(

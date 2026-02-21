@@ -30,6 +30,7 @@ typedef enum {
     WORK_NONE = 0,
     WORK_GEMV_TL1,
     WORK_MATMUL_F32,
+    WORK_MATMUL_F16F32,
     WORK_EXIT
 } work_type_t;
 
@@ -45,9 +46,10 @@ typedef struct {
     const uint8_t *lut_hi;
     float scale;
 
-    /* Matmul F32 params */
+    /* Matmul params */
     const float *x;
     const float *W_f32;
+    const uint16_t *W_f16;  /* F16 weights for logits matmul */
     int32_t K;
 
     /* Output (shared by both GEMV and matmul) */
@@ -103,5 +105,13 @@ void thread_pool_gemv(thread_pool_t *pool,
 void thread_pool_matmul(thread_pool_t *pool,
                         float *out, const float *x, const float *W,
                         int32_t M, int32_t K);
+
+/*
+ * Dispatch parallel F16xF32 matmul: split M output rows across threads.
+ * W is uint16_t (F16). Used for logits with F16 token embedding.
+ */
+void thread_pool_matmul_f16(thread_pool_t *pool,
+                             float *out, const float *x, const uint16_t *W,
+                             int32_t M, int32_t K);
 
 #endif /* BITNET_THREAD_POOL_H */

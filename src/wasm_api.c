@@ -160,6 +160,40 @@ int bitnet_generate(const char *prompt, int32_t max_tokens,
 }
 
 /*
+ * Change thread count without reloading the model.
+ * Destroys existing pool and creates a new one (or disables threading if 0).
+ * Returns 0 on success, -1 on failure.
+ */
+EMSCRIPTEN_KEEPALIVE
+int bitnet_set_threads(int32_t n_threads) {
+    if (!g_initialized) {
+        fprintf(stderr, "bitnet_set_threads: model not initialized\n");
+        return -1;
+    }
+
+    /* Destroy existing pool */
+    if (g_model.pool) {
+        thread_pool_destroy(&g_pool);
+        g_model.pool = NULL;
+    }
+
+    /* Create new pool if requested */
+    if (n_threads > 0) {
+        if (thread_pool_init(&g_pool, n_threads) == 0) {
+            g_model.pool = &g_pool;
+            fprintf(stderr, "Thread pool: %d workers\n", n_threads);
+        } else {
+            fprintf(stderr, "bitnet_set_threads: pool init failed\n");
+            return -1;
+        }
+    } else {
+        fprintf(stderr, "Threading disabled (single-threaded)\n");
+    }
+
+    return 0;
+}
+
+/*
  * Free all model memory.
  */
 EMSCRIPTEN_KEEPALIVE

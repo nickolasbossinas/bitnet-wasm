@@ -198,7 +198,7 @@
             </div>
             <div class="input-group">
                 <label>Threads (0 = single)</label>
-                <input type="number" id="threads-input" value="3" min="0" max="7">
+                <input type="number" id="threads-input" value="5" min="0" max="7">
             </div>
             <button id="load-btn" disabled>Load Model</button>
         </div>
@@ -246,6 +246,30 @@
         <pre id="output">Load a model to start generating text.</pre>
     </div>
 
+    <!-- Thread Benchmark -->
+    <div class="section" id="bench-section" style="display:none;">
+        <div class="section-title">Thread Benchmark</div>
+        <div class="controls">
+            <div class="input-group">
+                <label>Max threads to test</label>
+                <input type="number" id="bench-max-threads" value="7" min="1" max="7">
+            </div>
+            <button id="bench-btn" disabled>Benchmark Threads</button>
+        </div>
+        <pre id="bench-results" style="
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 0.8rem 1rem;
+            margin-top: 0.8rem;
+            font-family: 'Cascadia Code', 'Fira Code', monospace;
+            font-size: 0.8rem;
+            color: #8b949e;
+            white-space: pre-wrap;
+            display: none;
+        "></pre>
+    </div>
+
     <!-- Stats -->
     <pre id="stats"></pre>
 
@@ -254,6 +278,10 @@
         let worker = null;
         let modelLoaded = false;
         let generating = false;
+        let benchRunning = false;
+        let benchResults = [];
+        let benchQueue = [];
+        let benchStatsCollector = '';
 
         /* ---- DOM refs ---- */
         const statusEl = document.getElementById('status');
@@ -264,6 +292,10 @@
         const threadsInput = document.getElementById('threads-input');
         const loadBtn = document.getElementById('load-btn');
         const generateBtn = document.getElementById('generate-btn');
+        const benchSection = document.getElementById('bench-section');
+        const benchBtn = document.getElementById('bench-btn');
+        const benchMaxThreads = document.getElementById('bench-max-threads');
+        const benchResultsEl = document.getElementById('bench-results');
         const promptEl = document.getElementById('prompt');
 
         /* ---- SIMD check (same as benchmark) ---- */
@@ -324,11 +356,17 @@
                         modelLoaded = true;
                         setStatus('Model loaded. Ready to generate.', false);
                         generateBtn.disabled = false;
+                        benchBtn.disabled = false;
+                        benchSection.style.display = '';
                         outputEl.textContent = 'Model loaded. Enter a prompt and click Generate.';
                     } else {
                         setStatus('Load failed: ' + msg.error, false);
                     }
                     loadBtn.disabled = false;
+                    break;
+
+                case 'threads_set':
+                    if (benchRunning) benchNextStep();
                     break;
 
                 case 'token':
@@ -338,17 +376,49 @@
 
                 case 'stats':
                     /* Collect stderr lines for stats display */
-                    statsEl.style.display = 'block';
-                    statsEl.textContent += msg.text + '\n';
+                    if (benchRunning) {
+                        benchStatsCollector += msg.text + '\n';
+                    } else {
+                        statsEl.style.display = 'block';
+                        statsEl.textContent += msg.text + '\n';
+                    }
                     break;
 
                 case 'done':
                     generating = false;
-                    generateBtn.disabled = false;
-                    if (msg.n_tokens >= 0) {
-                        setStatus('Generated ' + msg.n_tokens + ' tokens.', false);
+                    if (benchRunning) {
+                        /* Parse decode tok/s from collected stats */
+                        var match = benchStatsCollector.match(/decode:\s+(\d+)\s+tokens,\s+([\d.]+)\s+ms\s+\(([\d.]+)\s+tok\/s\)/);
+                        var entry = {
+                            threads: benchQueue[0],
+                            decode_tps: match ? parseFloat(match[3]) : 0,
+                            decode_tokens: match ? parseInt(match[1]) : 0,
+                            decode_ms: match ? parseFloat(match[2]) : 0
+                        };
+                        benchResults.push(entry);
+                        benchQueue.shift();
+                        benchStatsCollector = '';
+                        updateBenchDisplay();
+                        if (benchQueue.length > 0) {
+                            /* Set threads for next run */
+                            setStatus('Benchmark: setting ' + benchQueue[0] + ' threads...', true);
+                            worker.postMessage({ type: 'set_threads', n_threads: benchQueue[0] });
+                        } else {
+                            benchRunning = false;
+                            generateBtn.disabled = false;
+                            benchBtn.disabled = false;
+                            /* Restore original thread count */
+                            var origThreads = parseInt(threadsInput.value) || 0;
+                            worker.postMessage({ type: 'set_threads', n_threads: origThreads });
+                            setStatus('Benchmark complete.', false);
+                        }
                     } else {
-                        setStatus('Generation failed.', false);
+                        generateBtn.disabled = false;
+                        if (msg.n_tokens >= 0) {
+                            setStatus('Generated ' + msg.n_tokens + ' tokens.', false);
+                        } else {
+                            setStatus('Generation failed.', false);
+                        }
                     }
                     break;
 
@@ -433,6 +503,77 @@
             });
         }
 
+        /* ---- Thread Benchmark ---- */
+        function updateBenchDisplay() {
+            benchResultsEl.style.display = 'block';
+            var lines = ['Threads  Decode tok/s  Tokens  Time (ms)'];
+            lines.push('-------  ------------  ------  ---------');
+            var best = 0, bestIdx = 0;
+            for (var i = 0; i < benchResults.length; i++) {
+                var r = benchResults[i];
+                var label = r.threads === 0 ? '0 (ST)' : String(r.threads + 1) + ' (' + r.threads + 'w)';
+                lines.push(
+                    label.padEnd(9) +
+                    r.decode_tps.toFixed(1).padStart(12) +
+                    String(r.decode_tokens).padStart(8) +
+                    r.decode_ms.toFixed(0).padStart(11)
+                );
+                if (r.decode_tps > best) {
+                    best = r.decode_tps;
+                    bestIdx = i;
+                }
+            }
+            if (benchResults.length > 1) {
+                var br = benchResults[bestIdx];
+                var label = br.threads === 0 ? '0 (single-threaded)' : (br.threads + 1) + ' total (' + br.threads + ' workers)';
+                lines.push('');
+                lines.push('Best: ' + best.toFixed(1) + ' tok/s with ' + label);
+                var baseline = benchResults[0].decode_tps;
+                if (baseline > 0 && best > baseline) {
+                    lines.push('Speedup: ' + (best / baseline).toFixed(2) + 'x over single-threaded');
+                }
+            }
+            benchResultsEl.textContent = lines.join('\n');
+        }
+
+        function benchNextStep() {
+            /* After set_threads completes, run generate */
+            var nThreads = benchQueue[0];
+            var total = nThreads === 0 ? 1 : nThreads + 1;
+            setStatus('Benchmark: running with ' + total + ' thread(s)...', true);
+            benchStatsCollector = '';
+            var prompt = promptEl.value || 'Hello';
+            worker.postMessage({
+                type: 'generate',
+                prompt: prompt,
+                max_tokens: parseInt(document.getElementById('max-tokens').value) || 64,
+                temperature: 0.0,
+                top_p: 0.9,
+                seed: 42,
+                repetition_penalty: parseFloat(document.getElementById('rep-penalty').value) || 1.1
+            });
+        }
+
+        function startBenchmark() {
+            if (!modelLoaded || benchRunning || generating) return;
+
+            benchRunning = true;
+            benchResults = [];
+            benchQueue = [];
+            generateBtn.disabled = true;
+            benchBtn.disabled = true;
+
+            var maxT = parseInt(benchMaxThreads.value) || 7;
+            for (var t = 0; t <= maxT; t++) benchQueue.push(t);
+
+            benchResultsEl.style.display = 'block';
+            benchResultsEl.textContent = 'Starting benchmark: 0 to ' + maxT + ' threads...\n';
+
+            /* Start with first thread count */
+            setStatus('Benchmark: setting ' + benchQueue[0] + ' threads...', true);
+            worker.postMessage({ type: 'set_threads', n_threads: benchQueue[0] });
+        }
+
         /* ---- Init ---- */
         async function init() {
             var simdOk = await checkSimd();
@@ -451,6 +592,7 @@
 
             loadBtn.onclick = loadModel;
             generateBtn.onclick = startGenerate;
+            benchBtn.onclick = startBenchmark;
         }
 
         init();
