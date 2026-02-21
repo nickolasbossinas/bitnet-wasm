@@ -2,6 +2,7 @@
 #include "../inference/sampler.h"
 #include "../inference/weight_loader.h"
 #include "../inference/tokenizer.h"
+#include "../inference/generate.h"
 #include "../kernels/tl1.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -585,6 +586,83 @@ static int test_tokenizer_roundtrip(void) {
     return TEST_PASS;
 }
 
+/* ---- Helper: free layer TL1 weights ---- */
+
+static void free_layer_weights(layer_weights_t *lw, int32_t n_layers) {
+    for (int32_t l = 0; l < n_layers; l++) {
+        free(lw[l].attn_q.indices);    free(lw[l].attn_q.indices_col);
+        free(lw[l].attn_k.indices);    free(lw[l].attn_k.indices_col);
+        free(lw[l].attn_v.indices);    free(lw[l].attn_v.indices_col);
+        free(lw[l].attn_o.indices);    free(lw[l].attn_o.indices_col);
+        free(lw[l].ffn_gate.indices);  free(lw[l].ffn_gate.indices_col);
+        free(lw[l].ffn_up.indices);    free(lw[l].ffn_up.indices_col);
+        free(lw[l].ffn_down.indices);  free(lw[l].ffn_down.indices_col);
+    }
+}
+
+/* ---- Test: End-to-end generation ---- */
+
+static int gen_token_count = 0;
+
+static void gen_test_callback(const char *piece, int32_t token_id, void *user_data) {
+    (void)user_data;
+    gen_token_count++;
+    fprintf(stderr, "[tok %d=%d \"%s\"] ", gen_token_count, token_id, piece);
+}
+
+static int test_generate(void) {
+    if (!gguf_model_path) { printf("(skipped - no model file) "); return TEST_PASS; }
+    if (ensure_gguf_loaded() != 0) return TEST_FAIL;
+
+    /* Load model with 2 layers */
+    model_t model;
+    memset(&model, 0, sizeof(model));
+    model_config_from_gguf(&model.config, shared_gguf);
+    model.config.n_layers = 2;
+
+    if (model_alloc(&model) != 0) return TEST_FAIL;
+    if (model_load_weights(&model, shared_gguf, shared_file_data, 2) != 0) {
+        model_free(&model);
+        return TEST_FAIL;
+    }
+
+    /* Init tokenizer */
+    tokenizer_t tok;
+    if (tokenizer_init(&tok, &shared_gguf->tokenizer) != 0) {
+        free_layer_weights(model.layers, model.config.n_layers);
+        model_free(&model);
+        return TEST_FAIL;
+    }
+
+    /* Generate 5 tokens from "Hello" */
+    generate_params_t params = {
+        .temperature = 0.0f,
+        .top_p = 0.9f,
+        .max_tokens = 5,
+        .seed = 42,
+    };
+
+    gen_token_count = 0;
+    int n = generate(&model, &tok, "Hello", &params, gen_test_callback, NULL);
+
+    tokenizer_free(&tok);
+    free_layer_weights(model.layers, model.config.n_layers);
+    model_free(&model);
+
+    /* Should produce > 0 tokens without crashing */
+    if (n <= 0) {
+        fprintf(stderr, "  generate returned %d\n", n);
+        return TEST_FAIL;
+    }
+    if (gen_token_count != n) {
+        fprintf(stderr, "  callback count mismatch: %d vs %d\n", gen_token_count, n);
+        return TEST_FAIL;
+    }
+
+    printf("(%d tokens) ", n);
+    return TEST_PASS;
+}
+
 /* ---- Test: GGUF loading + forward pass ---- */
 
 static int test_gguf_load_forward(void) {
@@ -611,14 +689,7 @@ static int test_gguf_load_forward(void) {
     float *logits = forward(&model, 0, 0);
     if (!logits) {
         fprintf(stderr, "  Forward pass returned NULL\n");
-        layer_weights_t *lw = &model.layers[0];
-        free(lw->attn_q.indices); free(lw->attn_q.indices_col);
-        free(lw->attn_k.indices); free(lw->attn_k.indices_col);
-        free(lw->attn_v.indices); free(lw->attn_v.indices_col);
-        free(lw->attn_o.indices); free(lw->attn_o.indices_col);
-        free(lw->ffn_gate.indices); free(lw->ffn_gate.indices_col);
-        free(lw->ffn_up.indices); free(lw->ffn_up.indices_col);
-        free(lw->ffn_down.indices); free(lw->ffn_down.indices_col);
+        free_layer_weights(model.layers, model.config.n_layers);
         model_free(&model);
         return TEST_FAIL;
     }
@@ -637,14 +708,7 @@ static int test_gguf_load_forward(void) {
     int32_t best = sample_argmax(logits, model.config.vocab_size);
     printf("(token=%d, logit=%.4f) ", best, logits[best]);
 
-    layer_weights_t *lw = &model.layers[0];
-    free(lw->attn_q.indices); free(lw->attn_q.indices_col);
-    free(lw->attn_k.indices); free(lw->attn_k.indices_col);
-    free(lw->attn_v.indices); free(lw->attn_v.indices_col);
-    free(lw->attn_o.indices); free(lw->attn_o.indices_col);
-    free(lw->ffn_gate.indices); free(lw->ffn_gate.indices_col);
-    free(lw->ffn_up.indices); free(lw->ffn_up.indices_col);
-    free(lw->ffn_down.indices); free(lw->ffn_down.indices_col);
+    free_layer_weights(model.layers, model.config.n_layers);
     model_free(&model);
 
     return ok ? TEST_PASS : TEST_FAIL;
@@ -697,6 +761,9 @@ int main(int argc, char **argv) {
 
     printf("\n GGUF loading:\n");
     RUN_TEST(gguf_load_forward);
+
+    printf("\n Generation:\n");
+    RUN_TEST(generate);
 
     /* Clean up shared GGUF data */
     if (shared_gguf) {

@@ -30,3 +30,18 @@ services:
           ./test_inference;
         fi
       "
+
+  generate:
+    image: gcc:latest
+    volumes:
+      - ../:/src
+    working_dir: /src/build-native
+    command: >
+      bash -c "
+        apt-get update -qq && apt-get install -y -qq cmake > /dev/null 2>&1 &&
+        mkdir -p /src/build-native &&
+        cd /src/build-native &&
+        cmake .. -DCMAKE_BUILD_TYPE=Release &&
+        make -j\$$(nproc) bitnet-cli &&
+        ./bitnet-cli /src/models/ggml-model-i2_s.gguf -p 'Hello' -n 32
+      "

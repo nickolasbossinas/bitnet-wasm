@@ -18,6 +18,7 @@ set(INFERENCE_SOURCES
     src/inference/sampler.c
     src/inference/weight_loader.c
     src/inference/tokenizer.c
+    src/inference/generate.c
 )
 
 # Benchmark
@@ -93,4 +94,8 @@ else()
     # GGUF inspector tool
     add_executable(inspect_gguf src/inference/gguf.c src/test/inspect_gguf.c)
     target_link_libraries(inspect_gguf m)
+
+    # CLI generation tool
+    add_executable(bitnet-cli ${KERNEL_SOURCES} ${INFERENCE_SOURCES} src/main.c)
+    target_link_libraries(bitnet-cli m)
 endif()
