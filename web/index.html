@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BitNet WASM SIMD Kernel Benchmark</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: #0d1117;
+            color: #c9d1d9;
+            padding: 2rem;
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        h1 {
+            color: #58a6ff;
+            margin-bottom: 0.5rem;
+            font-size: 1.5rem;
+        }
+        .subtitle {
+            color: #8b949e;
+            margin-bottom: 2rem;
+            font-size: 0.9rem;
+        }
+        .controls {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+            flex-wrap: wrap;
+            align-items: end;
+        }
+        .input-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.3rem;
+        }
+        .input-group label {
+            font-size: 0.8rem;
+            color: #8b949e;
+        }
+        input[type="number"] {
+            background: #161b22;
+            border: 1px solid #30363d;
+            color: #c9d1d9;
+            padding: 0.5rem 0.8rem;
+            border-radius: 6px;
+            width: 120px;
+            font-size: 0.9rem;
+        }
+        button {
+            background: #238636;
+            color: #fff;
+            border: none;
+            padding: 0.5rem 1.5rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            font-weight: 600;
+            height: fit-content;
+        }
+        button:hover { background: #2ea043; }
+        button:disabled {
+            background: #21262d;
+            color: #484f58;
+            cursor: not-allowed;
+        }
+        #status {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 0.8rem 1rem;
+            margin-bottom: 1.5rem;
+            font-size: 0.85rem;
+            min-height: 2.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .spinner {
+            width: 16px;
+            height: 16px;
+            border: 2px solid #30363d;
+            border-top: 2px solid #58a6ff;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            display: none;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        #output {
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 1rem;
+            font-family: 'Cascadia Code', 'Fira Code', monospace;
+            font-size: 0.82rem;
+            line-height: 1.6;
+            white-space: pre;
+            overflow-x: auto;
+            min-height: 200px;
+            color: #7ee787;
+        }
+        .simd-check {
+            margin-bottom: 1rem;
+            padding: 0.6rem 1rem;
+            border-radius: 6px;
+            font-size: 0.85rem;
+        }
+        .simd-yes {
+            background: #0d2818;
+            border: 1px solid #238636;
+            color: #7ee787;
+        }
+        .simd-no {
+            background: #2d1117;
+            border: 1px solid #da3633;
+            color: #f85149;
+        }
+    </style>
+</head>
+<body>
+    <h1>BitNet WASM SIMD Kernel Benchmark</h1>
+    <p class="subtitle">
+        Ternary lookup table (TL1) and Int2 (I2_S) GEMV kernels
+        compiled to WebAssembly with 128-bit SIMD
+    </p>
+
+    <div id="simd-status" class="simd-check"></div>
+
+    <div class="controls">
+        <div class="input-group">
+            <label>Rows (M)</label>
+            <input type="number" id="rows" value="2048" min="16" step="16">
+        </div>
+        <div class="input-group">
+            <label>Cols (K)</label>
+            <input type="number" id="cols" value="2048" min="16" step="16">
+        </div>
+        <button id="run-btn" onclick="runBenchmark()" disabled>Loading WASM...</button>
+    </div>
+
+    <div id="status">Initializing...</div>
+
+    <pre id="output">Waiting for WASM module to load...</pre>
+
+    <script>
+        let Module = null;
+
+        // Check SIMD support
+        async function checkSimd() {
+            const el = document.getElementById('simd-status');
+            try {
+                // Test WASM SIMD by trying to compile a module with v128
+                const bytes = new Uint8Array([
+                    0x00, 0x61, 0x73, 0x6d, // magic
+                    0x01, 0x00, 0x00, 0x00, // version
+                    0x01, 0x05, 0x01,       // type section
+                    0x60, 0x00, 0x01, 0x7b, // func type: () -> v128
+                    0x03, 0x02, 0x01, 0x00, // function section
+                    0x0a, 0x0a, 0x01,       // code section
+                    0x08, 0x00,             // func body
+                    0xfd, 0x0c,             // v128.const
+                    0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x00, 0x00,
+                    0x0b                    // end
+                ]);
+                await WebAssembly.compile(bytes.buffer);
+                el.className = 'simd-check simd-yes';
+                el.textContent = 'WASM SIMD supported';
+                return true;
+            } catch (e) {
+                el.className = 'simd-check simd-no';
+                el.textContent = 'WASM SIMD NOT supported — benchmark will fail';
+                return false;
+            }
+        }
+
+        // Capture printf output from WASM
+        let outputBuffer = '';
+
+        async function init() {
+            const simdOk = await checkSimd();
+
+            const statusEl = document.getElementById('status');
+            const outputEl = document.getElementById('output');
+            const btnEl = document.getElementById('run-btn');
+
+            if (!simdOk) {
+                statusEl.textContent = 'Your browser does not support WASM SIMD.';
+                outputEl.textContent = 'Cannot run benchmark without WASM SIMD support.';
+                return;
+            }
+
+            statusEl.innerHTML = '<div class="spinner" style="display:inline-block"></div> Loading WASM module...';
+
+            try {
+                Module = await BitNetBench({
+                    print: (text) => {
+                        outputBuffer += text + '\n';
+                        outputEl.textContent = outputBuffer;
+                        outputEl.scrollTop = outputEl.scrollHeight;
+                    },
+                    printErr: (text) => {
+                        console.error(text);
+                    }
+                });
+
+                statusEl.textContent = 'Ready. Click "Run Benchmark" to start.';
+                btnEl.textContent = 'Run Benchmark';
+                btnEl.disabled = false;
+                outputEl.textContent = 'Ready.\n';
+                outputBuffer = '';
+            } catch (e) {
+                statusEl.textContent = 'Failed to load WASM: ' + e.message;
+                outputEl.textContent = 'Error: ' + e.message;
+            }
+        }
+
+        function runBenchmark() {
+            const M = parseInt(document.getElementById('rows').value) || 2048;
+            const K = parseInt(document.getElementById('cols').value) || 2048;
+
+            // Ensure K is even (TL1 requires pairs)
+            const K_even = K % 2 === 0 ? K : K + 1;
+
+            const statusEl = document.getElementById('status');
+            const btnEl = document.getElementById('run-btn');
+
+            btnEl.disabled = true;
+            outputBuffer = '';
+            document.getElementById('output').textContent = '';
+
+            statusEl.innerHTML = '<div class="spinner" style="display:inline-block"></div> Running benchmark...';
+
+            // Run async to let UI update
+            setTimeout(() => {
+                try {
+                    Module.ccall('run_benchmark', 'number',
+                                 ['number', 'number'], [M, K_even]);
+                    statusEl.textContent = 'Done. Results above.';
+                } catch (e) {
+                    statusEl.textContent = 'Benchmark failed: ' + e.message;
+                    document.getElementById('output').textContent += '\nError: ' + e.message;
+                }
+                btnEl.disabled = false;
+            }, 50);
+        }
+
+        init();
+    </script>
+    <script src="benchmark.js" async></script>
+</body>
+</html>
