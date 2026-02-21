@@ -182,7 +182,7 @@
 
     <div id="simd-status" class="simd-check"></div>
 
-    <div id="status">Initializing Web Worker...</div>
+    <div id="status">Initializing...</div>
 
     <!-- Model Loading -->
     <div class="section">
@@ -273,15 +273,11 @@
     <!-- Stats -->
     <pre id="stats"></pre>
 
-    <script>
+    <script type="module">
+        import { BitNet } from './bitnet.js';
+
         /* ---- State ---- */
-        let worker = null;
-        let modelLoaded = false;
-        let generating = false;
-        let benchRunning = false;
-        let benchResults = [];
-        let benchQueue = [];
-        let benchStatsCollector = '';
+        const bitnet = new BitNet();
 
         /* ---- DOM refs ---- */
         const statusEl = document.getElementById('status');
@@ -298,7 +294,7 @@
         const benchResultsEl = document.getElementById('bench-results');
         const promptEl = document.getElementById('prompt');
 
-        /* ---- SIMD check (same as benchmark) ---- */
+        /* ---- SIMD check ---- */
         async function checkSimd() {
             const el = document.getElementById('simd-status');
             try {
@@ -313,7 +309,7 @@
                     0x0b
                 ]);
                 await WebAssembly.compile(bytes);
-                var sabOk = typeof SharedArrayBuffer !== 'undefined';
+                const sabOk = typeof SharedArrayBuffer !== 'undefined';
                 el.className = 'simd-check simd-yes';
                 el.textContent = 'WASM SIMD supported' +
                     (sabOk ? ' | SharedArrayBuffer enabled (threading OK)' :
@@ -330,109 +326,16 @@
             }
         }
 
-        /* ---- Status helpers ---- */
+        /* ---- Status helper ---- */
         function setStatus(text, showSpinner) {
             statusEl.innerHTML = (showSpinner
                 ? '<div class="spinner" style="display:inline-block"></div> '
                 : '') + text;
         }
 
-        /* ---- Worker message handler ---- */
-        function onWorkerMessage(e) {
-            var msg = e.data;
-            switch (msg.type) {
-                case 'ready':
-                    setStatus('WASM module loaded. Select a GGUF model file.', false);
-                    fileInput.disabled = false;
-                    loadBtn.disabled = false;
-                    break;
-
-                case 'progress':
-                    setStatus(msg.message, true);
-                    break;
-
-                case 'loaded':
-                    if (msg.success) {
-                        modelLoaded = true;
-                        setStatus('Model loaded. Ready to generate.', false);
-                        generateBtn.disabled = false;
-                        benchBtn.disabled = false;
-                        benchSection.style.display = '';
-                        outputEl.textContent = 'Model loaded. Enter a prompt and click Generate.';
-                    } else {
-                        setStatus('Load failed: ' + msg.error, false);
-                    }
-                    loadBtn.disabled = false;
-                    break;
-
-                case 'threads_set':
-                    if (benchRunning) benchNextStep();
-                    break;
-
-                case 'token':
-                    outputEl.querySelector('.gen-text').textContent += msg.piece;
-                    outputEl.scrollTop = outputEl.scrollHeight;
-                    break;
-
-                case 'stats':
-                    /* Collect stderr lines for stats display */
-                    if (benchRunning) {
-                        benchStatsCollector += msg.text + '\n';
-                    } else {
-                        statsEl.style.display = 'block';
-                        statsEl.textContent += msg.text + '\n';
-                    }
-                    break;
-
-                case 'done':
-                    generating = false;
-                    if (benchRunning) {
-                        /* Parse decode tok/s from collected stats */
-                        var match = benchStatsCollector.match(/decode:\s+(\d+)\s+tokens,\s+([\d.]+)\s+ms\s+\(([\d.]+)\s+tok\/s\)/);
-                        var entry = {
-                            threads: benchQueue[0],
-                            decode_tps: match ? parseFloat(match[3]) : 0,
-                            decode_tokens: match ? parseInt(match[1]) : 0,
-                            decode_ms: match ? parseFloat(match[2]) : 0
-                        };
-                        benchResults.push(entry);
-                        benchQueue.shift();
-                        benchStatsCollector = '';
-                        updateBenchDisplay();
-                        if (benchQueue.length > 0) {
-                            /* Set threads for next run */
-                            setStatus('Benchmark: setting ' + benchQueue[0] + ' threads...', true);
-                            worker.postMessage({ type: 'set_threads', n_threads: benchQueue[0] });
-                        } else {
-                            benchRunning = false;
-                            generateBtn.disabled = false;
-                            benchBtn.disabled = false;
-                            /* Restore original thread count */
-                            var origThreads = parseInt(threadsInput.value) || 0;
-                            worker.postMessage({ type: 'set_threads', n_threads: origThreads });
-                            setStatus('Benchmark complete.', false);
-                        }
-                    } else {
-                        generateBtn.disabled = false;
-                        if (msg.n_tokens >= 0) {
-                            setStatus('Generated ' + msg.n_tokens + ' tokens.', false);
-                        } else {
-                            setStatus('Generation failed.', false);
-                        }
-                    }
-                    break;
-
-                case 'error':
-                    generating = false;
-                    generateBtn.disabled = false;
-                    setStatus('Error: ' + msg.message, false);
-                    break;
-            }
-        }
-
         /* ---- Load model ---- */
-        function loadModel() {
-            var file = fileInput.files[0];
+        async function loadModel() {
+            const file = fileInput.files[0];
             if (!file) {
                 setStatus('Please select a GGUF file first.', false);
                 return;
@@ -440,40 +343,42 @@
 
             loadBtn.disabled = true;
             generateBtn.disabled = true;
-            modelLoaded = false;
 
-            var sizeMB = (file.size / 1024 / 1024).toFixed(0);
-            setStatus('Reading ' + file.name + ' (' + sizeMB + ' MB)...', true);
+            try {
+                const sizeMB = (file.size / 1024 / 1024).toFixed(0);
+                setStatus('Reading ' + file.name + ' (' + sizeMB + ' MB)...', true);
 
-            var reader = new FileReader();
-            reader.onload = function(e) {
-                var buffer = e.target.result;
-                var nLayers = parseInt(layersInput.value) || -1;
-                var nThreads = parseInt(threadsInput.value) || 0;
-                /* Transfer the ArrayBuffer to worker (zero-copy) */
-                worker.postMessage(
-                    { type: 'load', buffer: buffer, n_layers: nLayers, n_threads: nThreads },
-                    [buffer]
-                );
-            };
-            reader.onerror = function() {
-                setStatus('Failed to read file.', false);
-                loadBtn.disabled = false;
-            };
-            reader.readAsArrayBuffer(file);
+                const buffer = await file.arrayBuffer();
+
+                setStatus('Loading WASM module...', true);
+
+                await bitnet.load(buffer, {
+                    threads: parseInt(threadsInput.value) || 0,
+                    layers: parseInt(layersInput.value) || -1,
+                    onProgress: ({ message }) => setStatus(message, true)
+                });
+
+                setStatus('Model loaded. Ready to generate.', false);
+                generateBtn.disabled = false;
+                benchBtn.disabled = false;
+                benchSection.style.display = '';
+                outputEl.textContent = 'Model loaded. Enter a prompt and click Generate.';
+            } catch (e) {
+                setStatus('Load failed: ' + e.message, false);
+            }
+            loadBtn.disabled = false;
         }
 
         /* ---- Generate ---- */
-        function startGenerate() {
-            if (!modelLoaded || generating) return;
+        async function startGenerate() {
+            if (!bitnet.loaded || bitnet.generating) return;
 
-            var prompt = promptEl.value;
+            const prompt = promptEl.value;
             if (!prompt) {
                 setStatus('Please enter a prompt.', false);
                 return;
             }
 
-            generating = true;
             generateBtn.disabled = true;
 
             /* Clear output, show prompt in grey + generated text in green */
@@ -484,34 +389,59 @@
             statsEl.textContent = '';
             statsEl.style.display = 'none';
 
-            var maxTokens = parseInt(document.getElementById('max-tokens').value) || 64;
-            var temperature = parseFloat(document.getElementById('temperature').value) || 0.0;
-            var topP = parseFloat(document.getElementById('top-p').value) || 0.9;
-            var repPenalty = parseFloat(document.getElementById('rep-penalty').value) || 1.1;
-            var seed = parseInt(document.getElementById('seed').value) || 42;
-
             setStatus('Generating...', true);
 
-            worker.postMessage({
-                type: 'generate',
-                prompt: prompt,
-                max_tokens: maxTokens,
-                temperature: temperature,
-                top_p: topP,
-                seed: seed,
-                repetition_penalty: repPenalty
-            });
+            try {
+                const result = await bitnet.generate(prompt, {
+                    maxTokens: parseInt(document.getElementById('max-tokens').value) || 64,
+                    temperature: parseFloat(document.getElementById('temperature').value) || 0.0,
+                    topP: parseFloat(document.getElementById('top-p').value) || 0.9,
+                    seed: parseInt(document.getElementById('seed').value) || 42,
+                    repetitionPenalty: parseFloat(document.getElementById('rep-penalty').value) || 1.1,
+                    onToken: (piece) => {
+                        outputEl.querySelector('.gen-text').textContent += piece;
+                        outputEl.scrollTop = outputEl.scrollHeight;
+                    }
+                });
+
+                /* Display stats */
+                const s = result.stats;
+                if (s.prefillTokPerSec || s.decodeTokPerSec) {
+                    statsEl.style.display = 'block';
+                    let text = '';
+                    if (s.prefillTokens) {
+                        text += 'Prefill: ' + s.prefillTokens + ' tokens, ' +
+                            s.prefillMs.toFixed(1) + ' ms (' + s.prefillTokPerSec.toFixed(1) + ' tok/s)\n';
+                    }
+                    if (s.decodeTokens) {
+                        text += 'Decode: ' + s.decodeTokens + ' tokens, ' +
+                            s.decodeMs.toFixed(1) + ' ms (' + s.decodeTokPerSec.toFixed(1) + ' tok/s)\n';
+                    }
+                    if (s.totalMs) {
+                        text += 'Total: ' + s.totalMs.toFixed(1) + ' ms';
+                    }
+                    statsEl.textContent = text;
+                }
+
+                setStatus('Generated ' + result.tokenCount + ' tokens.', false);
+            } catch (e) {
+                if (e.name === 'AbortError') {
+                    setStatus('Generation aborted.', false);
+                } else {
+                    setStatus('Error: ' + e.message, false);
+                }
+            }
+            generateBtn.disabled = false;
         }
 
         /* ---- Thread Benchmark ---- */
-        function updateBenchDisplay() {
-            benchResultsEl.style.display = 'block';
-            var lines = ['Threads  Decode tok/s  Tokens  Time (ms)'];
+        function formatBenchResults(results) {
+            const lines = ['Threads  Decode tok/s  Tokens  Time (ms)'];
             lines.push('-------  ------------  ------  ---------');
-            var best = 0, bestIdx = 0;
-            for (var i = 0; i < benchResults.length; i++) {
-                var r = benchResults[i];
-                var label = r.threads === 0 ? '0 (ST)' : String(r.threads + 1) + ' (' + r.threads + 'w)';
+            let best = 0, bestIdx = 0;
+            for (let i = 0; i < results.length; i++) {
+                const r = results[i];
+                const label = r.threads === 0 ? '0 (ST)' : (r.threads + 1) + ' (' + r.threads + 'w)';
                 lines.push(
                     label.padEnd(9) +
                     r.decode_tps.toFixed(1).padStart(12) +
@@ -523,72 +453,78 @@
                     bestIdx = i;
                 }
             }
-            if (benchResults.length > 1) {
-                var br = benchResults[bestIdx];
-                var label = br.threads === 0 ? '0 (single-threaded)' : (br.threads + 1) + ' total (' + br.threads + ' workers)';
+            if (results.length > 1) {
+                const br = results[bestIdx];
+                const label = br.threads === 0 ? '0 (single-threaded)' :
+                    (br.threads + 1) + ' total (' + br.threads + ' workers)';
                 lines.push('');
                 lines.push('Best: ' + best.toFixed(1) + ' tok/s with ' + label);
-                var baseline = benchResults[0].decode_tps;
+                const baseline = results[0].decode_tps;
                 if (baseline > 0 && best > baseline) {
                     lines.push('Speedup: ' + (best / baseline).toFixed(2) + 'x over single-threaded');
                 }
             }
-            benchResultsEl.textContent = lines.join('\n');
+            return lines.join('\n');
         }
 
-        function benchNextStep() {
-            /* After set_threads completes, run generate */
-            var nThreads = benchQueue[0];
-            var total = nThreads === 0 ? 1 : nThreads + 1;
-            setStatus('Benchmark: running with ' + total + ' thread(s)...', true);
-            benchStatsCollector = '';
-            var prompt = promptEl.value || 'Hello';
-            worker.postMessage({
-                type: 'generate',
-                prompt: prompt,
-                max_tokens: parseInt(document.getElementById('max-tokens').value) || 64,
-                temperature: 0.0,
-                top_p: 0.9,
-                seed: 42,
-                repetition_penalty: parseFloat(document.getElementById('rep-penalty').value) || 1.1
-            });
-        }
+        async function startBenchmark() {
+            if (!bitnet.loaded || bitnet.generating) return;
 
-        function startBenchmark() {
-            if (!modelLoaded || benchRunning || generating) return;
-
-            benchRunning = true;
-            benchResults = [];
-            benchQueue = [];
-            generateBtn.disabled = true;
             benchBtn.disabled = true;
+            generateBtn.disabled = true;
 
-            var maxT = parseInt(benchMaxThreads.value) || 7;
-            for (var t = 0; t <= maxT; t++) benchQueue.push(t);
+            const maxT = parseInt(benchMaxThreads.value) || 7;
+            const results = [];
+            const prompt = promptEl.value || 'Hello';
+            const maxTokens = parseInt(document.getElementById('max-tokens').value) || 64;
+            const repPenalty = parseFloat(document.getElementById('rep-penalty').value) || 1.1;
 
             benchResultsEl.style.display = 'block';
             benchResultsEl.textContent = 'Starting benchmark: 0 to ' + maxT + ' threads...\n';
 
-            /* Start with first thread count */
-            setStatus('Benchmark: setting ' + benchQueue[0] + ' threads...', true);
-            worker.postMessage({ type: 'set_threads', n_threads: benchQueue[0] });
+            for (let t = 0; t <= maxT; t++) {
+                const total = t === 0 ? 1 : t + 1;
+                setStatus('Benchmark: setting ' + t + ' threads...', true);
+                await bitnet.setThreads(t);
+
+                setStatus('Benchmark: running with ' + total + ' thread(s)...', true);
+                const result = await bitnet.generate(prompt, {
+                    maxTokens,
+                    temperature: 0.0,
+                    topP: 0.9,
+                    seed: 42,
+                    repetitionPenalty: repPenalty
+                });
+
+                results.push({
+                    threads: t,
+                    decode_tps: result.stats.decodeTokPerSec || 0,
+                    decode_tokens: result.stats.decodeTokens || 0,
+                    decode_ms: result.stats.decodeMs || 0
+                });
+                benchResultsEl.textContent = formatBenchResults(results);
+            }
+
+            /* Restore original thread count */
+            const origThreads = parseInt(threadsInput.value) || 0;
+            await bitnet.setThreads(origThreads);
+
+            generateBtn.disabled = false;
+            benchBtn.disabled = false;
+            setStatus('Benchmark complete.', false);
         }
 
         /* ---- Init ---- */
         async function init() {
-            var simdOk = await checkSimd();
+            const simdOk = await checkSimd();
             if (!simdOk) {
                 setStatus('Your browser does not support WASM SIMD.', false);
                 return;
             }
 
-            setStatus('Loading WASM module...', true);
-
-            worker = new Worker('worker.js');
-            worker.onmessage = onWorkerMessage;
-            worker.onerror = function(e) {
-                setStatus('Worker error: ' + e.message, false);
-            };
+            setStatus('Select a GGUF model file.', false);
+            fileInput.disabled = false;
+            loadBtn.disabled = false;
 
             loadBtn.onclick = loadModel;
             generateBtn.onclick = startGenerate;

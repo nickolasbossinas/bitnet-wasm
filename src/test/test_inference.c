@@ -701,7 +701,7 @@ static int test_generate(void) {
     };
 
     gen_token_count = 0;
-    int n = generate(&model, &tok, "Hello", &params, gen_test_callback, NULL);
+    int n = generate(&model, &tok, "Hello", &params, gen_test_callback, NULL, NULL);
 
     tokenizer_free(&tok);
     free_layer_weights(model.layers, model.config.n_layers);

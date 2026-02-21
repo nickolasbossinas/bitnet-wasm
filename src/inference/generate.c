@@ -23,7 +23,7 @@ static double get_time_ms(void) {
 
 int generate(model_t *model, tokenizer_t *tok, const char *prompt,
              const generate_params_t *params, token_callback_t callback,
-             void *user_data) {
+             void *user_data, volatile int32_t *abort_flag) {
     /* Encode prompt */
     int32_t prompt_tokens[4096];
     int32_t n_prompt = tokenizer_encode(tok, prompt, prompt_tokens, 4096, 1);
@@ -78,6 +78,13 @@ int generate(model_t *model, tokenizer_t *tok, const char *prompt,
     int32_t consecutive_newlines = 0;
 
     for (int32_t i = 0; i < max_new; i++) {
+        /* Check for external abort request */
+        if (abort_flag && *abort_flag) {
+            *abort_flag = 0;
+            fprintf(stderr, "[generate] aborted by caller\n");
+            break;
+        }
+
         /* Apply repetition penalty to logits for previously seen tokens */
         if (rep_penalty != 1.0f) {
             for (int32_t h = 0; h < history_len; h++) {

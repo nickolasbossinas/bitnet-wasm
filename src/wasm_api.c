@@ -26,6 +26,7 @@ static model_t g_model;
 static tokenizer_t g_tok;
 static thread_pool_t g_pool;
 static int g_initialized = 0;
+static volatile int32_t g_abort = 0;
 
 /* Token callback: stream each token to main thread via postMessage */
 static void wasm_token_callback(const char *piece, int32_t token_id,
@@ -155,8 +156,9 @@ int bitnet_generate(const char *prompt, int32_t max_tokens,
         .repetition_penalty = repetition_penalty,
     };
 
+    g_abort = 0;
     return generate(&g_model, &g_tok, prompt, &params,
-                     wasm_token_callback, NULL);
+                     wasm_token_callback, NULL, &g_abort);
 }
 
 /*
@@ -190,6 +192,33 @@ int bitnet_set_threads(int32_t n_threads) {
         fprintf(stderr, "Threading disabled (single-threaded)\n");
     }
 
+    return 0;
+}
+
+/*
+ * Abort in-flight generation. Safe to call from any thread.
+ * The decode loop checks this flag and stops early.
+ */
+EMSCRIPTEN_KEEPALIVE
+void bitnet_abort(void) {
+    g_abort = 1;
+}
+
+/*
+ * Query model configuration after loading.
+ * Writes 6 int32 values to out[]: n_layers, hidden_size, vocab_size,
+ * n_heads, max_seq_len, n_threads.
+ * Returns 0 on success, -1 if not initialized.
+ */
+EMSCRIPTEN_KEEPALIVE
+int bitnet_get_config(int32_t *out) {
+    if (!g_initialized) return -1;
+    out[0] = g_model.config.n_layers;
+    out[1] = g_model.config.hidden_size;
+    out[2] = g_model.config.vocab_size;
+    out[3] = g_model.config.n_heads;
+    out[4] = g_model.config.max_seq_len;
+    out[5] = g_model.pool ? g_model.pool->n_threads : 0;
     return 0;
 }
 

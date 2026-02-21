@@ -92,7 +92,7 @@ if(EMSCRIPTEN)
 
     target_link_options(bitnet-inference PRIVATE
         # Exported C functions (callable from JS)
-        -sEXPORTED_FUNCTIONS=['_bitnet_init','_bitnet_generate','_bitnet_set_threads','_bitnet_free','_malloc','_free']
+        -sEXPORTED_FUNCTIONS=['_bitnet_init','_bitnet_generate','_bitnet_set_threads','_bitnet_abort','_bitnet_get_config','_bitnet_free','_malloc','_free']
         -sEXPORTED_RUNTIME_METHODS=['ccall','cwrap','UTF8ToString','stringToNewUTF8','HEAPU8']
 
         # Memory: 4GB max for full 30-layer model (~3.2 GB peak during loading)
@@ -123,6 +123,9 @@ if(EMSCRIPTEN)
         COMMAND ${CMAKE_COMMAND} -E copy
             ${CMAKE_SOURCE_DIR}/web/worker.js
             ${CMAKE_BINARY_DIR}/worker.js
+        COMMAND ${CMAKE_COMMAND} -E copy
+            ${CMAKE_SOURCE_DIR}/web/bitnet.js
+            ${CMAKE_BINARY_DIR}/bitnet.js
         COMMAND ${CMAKE_COMMAND} -E copy
             ${CMAKE_SOURCE_DIR}/web/inference.html
             ${CMAKE_BINARY_DIR}/inference.html

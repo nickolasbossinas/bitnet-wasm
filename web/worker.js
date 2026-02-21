@@ -7,6 +7,9 @@
  * Inbound:
  *   {type: 'load', buffer: ArrayBuffer, n_layers: number, n_threads: number}
  *   {type: 'generate', prompt, max_tokens, temperature, top_p, seed, repetition_penalty}
+ *   {type: 'set_threads', n_threads: number}
+ *   {type: 'abort'}
+ *   {type: 'get_config'}
  *
  * Outbound:
  *   {type: 'ready'}
@@ -15,6 +18,8 @@
  *   {type: 'token', piece: string, id: number}   (from C via EM_ASM)
  *   {type: 'stats', text: string}
  *   {type: 'done', n_tokens: number}
+ *   {type: 'threads_set', success: boolean, n_threads: number}
+ *   {type: 'config', config: object}
  *   {type: 'error', message: string}
  */
 
@@ -120,6 +125,26 @@ function setThreads(nThreads) {
     }
 }
 
+function getConfig() {
+    try {
+        var ptr = Module._malloc(6 * 4);
+        Module._bitnet_get_config(ptr);
+        var view = new Int32Array(Module.HEAPU8.buffer, ptr, 6);
+        var config = {
+            nLayers: view[0],
+            hiddenSize: view[1],
+            vocabSize: view[2],
+            nHeads: view[3],
+            maxSeqLen: view[4],
+            nThreads: view[5]
+        };
+        Module._free(ptr);
+        self.postMessage({ type: 'config', config: config });
+    } catch (e) {
+        self.postMessage({ type: 'error', message: 'get_config failed: ' + e.message });
+    }
+}
+
 self.onmessage = function(e) {
     var msg = e.data;
     switch (msg.type) {
@@ -138,6 +163,15 @@ self.onmessage = function(e) {
                 msg.seed || 42,
                 msg.repetition_penalty || 1.1
             );
+            break;
+        case 'abort':
+            Module._bitnet_abort();
+            break;
+        case 'get_config':
+            getConfig();
+            break;
+        case 'free':
+            Module._bitnet_free();
             break;
     }
 };

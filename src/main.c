@@ -172,7 +172,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "Params: temp=%.2f, top_p=%.2f, rep_penalty=%.2f, max_tokens=%d, seed=%u\n\n",
             temperature, top_p, rep_penalty, max_tokens, seed);
 
-    int n = generate(&model, &tok, prompt, &params, stream_token, NULL);
+    int n = generate(&model, &tok, prompt, &params, stream_token, NULL, NULL);
     printf("\n");
 
     if (n < 0) {

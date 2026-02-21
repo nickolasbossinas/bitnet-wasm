@@ -32,17 +32,18 @@ typedef void (*token_callback_t)(const char *piece, int32_t token_id,
 /*
  * Generate text from a prompt.
  *
- * model:     initialized model with weights loaded
- * tok:       initialized tokenizer
- * prompt:    input text
- * params:    generation parameters
- * callback:  called for each new token (NULL to suppress output)
- * user_data: passed to callback
+ * model:      initialized model with weights loaded
+ * tok:        initialized tokenizer
+ * prompt:     input text
+ * params:     generation parameters
+ * callback:   called for each new token (NULL to suppress output)
+ * user_data:  passed to callback
+ * abort_flag: if non-NULL, generation stops when *abort_flag becomes nonzero
  *
  * Returns number of tokens generated, or -1 on error.
  */
 int generate(model_t *model, tokenizer_t *tok, const char *prompt,
              const generate_params_t *params, token_callback_t callback,
-             void *user_data);
+             void *user_data, volatile int32_t *abort_flag);
 
 #endif /* BITNET_GENERATE_H */
