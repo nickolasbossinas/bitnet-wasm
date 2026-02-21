@@ -44,7 +44,7 @@ typedef struct {
     /* Norm weights (F32) */
     float *attn_norm;          /* [hidden_size] RMSNorm before attention */
     float *ffn_norm;           /* [hidden_size] RMSNorm before FFN */
-    float *attn_sub_norm;      /* [head_dim] SubLN before W_o */
+    float *attn_sub_norm;      /* [hidden_size] SubLN before W_o */
     float *ffn_sub_norm;       /* [intermediate_size] SubLN before W_down */
 } layer_weights_t;
 

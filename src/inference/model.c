@@ -281,19 +281,8 @@ float *forward(model_t *model, int32_t token, int32_t pos) {
         }
 
         /* SubLN: RMSNorm before output projection */
-        /* attn_sub_norm is [head_dim], applied per-head */
-        for (int32_t h = 0; h < n_heads; h++) {
-            float *head_out = &model->xb[h * head_dim];
-            /* In-place RMSNorm with per-head weights */
-            float ss = 0.0f;
-            for (int32_t d = 0; d < head_dim; d++) {
-                ss += head_out[d] * head_out[d];
-            }
-            ss = 1.0f / sqrtf(ss / head_dim + c->rms_norm_eps);
-            for (int32_t d = 0; d < head_dim; d++) {
-                head_out[d] = head_out[d] * ss * lw->attn_sub_norm[d];
-            }
-        }
+        /* attn_sub_norm is [hidden_size], applied over full concatenated output */
+        rms_norm(model->xb, model->xb, lw->attn_sub_norm, dim, c->rms_norm_eps);
 
         /* Output projection + residual */
         bitlinear(model->xb2, model->xb, &lw->attn_o);

@@ -138,6 +138,7 @@ static uint64_t tensor_type_size(int32_t type, uint64_t n_elements) {
         case GGML_TYPE_Q8_0: return (n_elements / 32) * 34;   /* 32 int8 + 1 fp16 scale */
         case GGML_TYPE_TQ1_0: return (n_elements / 256) * 54; /* 256 trits in 54 bytes */
         case GGML_TYPE_TQ2_0: return (n_elements / 256) * 66; /* 256 trits in 66 bytes */
+        case GGML_TYPE_I2_S:  return (n_elements + 3) / 4;    /* 2 bits per weight, 4 per byte */
         default:
             /* For quantized types we don't handle, estimate conservatively */
             return n_elements;
@@ -185,30 +186,27 @@ int gguf_parse(gguf_context_t *ctx, const uint8_t *data, size_t size) {
         if (!key) return -1;
         uint32_t value_type = read_u32(&c);
 
-        /* Extract architecture metadata we care about */
-        if (strcmp(key, "llama.embedding_length") == 0 ||
-            strcmp(key, "bitnet.embedding_length") == 0) {
+        /*
+         * Extract architecture metadata we care about.
+         * Use suffix matching since the key prefix varies:
+         *   llama.*, bitnet.*, bitnet-b1.58.*, etc.
+         */
+        if (strstr(key, ".embedding_length") != NULL) {
             ctx->hidden_size = (int32_t)read_u32(&c);
-        } else if (strcmp(key, "llama.feed_forward_length") == 0 ||
-                   strcmp(key, "bitnet.feed_forward_length") == 0) {
+        } else if (strstr(key, ".feed_forward_length") != NULL) {
             ctx->intermediate_size = (int32_t)read_u32(&c);
-        } else if (strcmp(key, "llama.block_count") == 0 ||
-                   strcmp(key, "bitnet.block_count") == 0) {
+        } else if (strstr(key, ".block_count") != NULL) {
             ctx->n_layers = (int32_t)read_u32(&c);
-        } else if (strcmp(key, "llama.attention.head_count") == 0 ||
-                   strcmp(key, "bitnet.attention.head_count") == 0) {
-            ctx->n_heads = (int32_t)read_u32(&c);
-        } else if (strcmp(key, "llama.attention.head_count_kv") == 0 ||
-                   strcmp(key, "bitnet.attention.head_count_kv") == 0) {
+        } else if (strstr(key, ".attention.head_count_kv") != NULL) {
+            /* Must check head_count_kv before head_count (substring match) */
             ctx->n_kv_heads = (int32_t)read_u32(&c);
-        } else if (strcmp(key, "llama.rope.freq_base") == 0 ||
-                   strcmp(key, "bitnet.rope.freq_base") == 0) {
+        } else if (strstr(key, ".attention.head_count") != NULL) {
+            ctx->n_heads = (int32_t)read_u32(&c);
+        } else if (strstr(key, ".rope.freq_base") != NULL) {
             ctx->rope_theta = read_f32(&c);
-        } else if (strcmp(key, "llama.attention.layer_norm_rms_epsilon") == 0 ||
-                   strcmp(key, "bitnet.attention.layer_norm_rms_epsilon") == 0) {
+        } else if (strstr(key, ".layer_norm_rms_epsilon") != NULL) {
             ctx->rms_norm_eps = read_f32(&c);
-        } else if (strcmp(key, "llama.context_length") == 0 ||
-                   strcmp(key, "bitnet.context_length") == 0) {
+        } else if (strstr(key, ".context_length") != NULL) {
             ctx->max_seq_len = (int32_t)read_u32(&c);
         } else if (strcmp(key, "tokenizer.ggml.tokens") == 0) {
             /* Array of strings — count gives vocab size */
@@ -308,6 +306,7 @@ const char *ggml_type_name(int32_t type) {
         case GGML_TYPE_Q8_0:  return "Q8_0";
         case GGML_TYPE_TQ1_0: return "TQ1_0";
         case GGML_TYPE_TQ2_0: return "TQ2_0";
+        case GGML_TYPE_I2_S:  return "I2_S";
         case GGML_TYPE_I32:   return "I32";
         default:              return "unknown";
     }

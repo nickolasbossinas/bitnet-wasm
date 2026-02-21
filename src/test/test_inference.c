@@ -1,5 +1,6 @@
 #include "../inference/model.h"
 #include "../inference/sampler.h"
+#include "../inference/weight_loader.h"
 #include "../kernels/tl1.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -290,14 +291,12 @@ static int test_forward_pass(void) {
     /* Norm weights (all ~1.0) */
     lw->attn_norm = (float *)malloc(dim * sizeof(float));
     lw->ffn_norm = (float *)malloc(dim * sizeof(float));
-    lw->attn_sub_norm = (float *)malloc(model.config.head_dim * sizeof(float));
+    lw->attn_sub_norm = (float *)malloc(dim * sizeof(float));
     lw->ffn_sub_norm = (float *)malloc(inter * sizeof(float));
 
     for (int i = 0; i < dim; i++) {
         lw->attn_norm[i] = 1.0f;
         lw->ffn_norm[i] = 1.0f;
-    }
-    for (int i = 0; i < model.config.head_dim; i++) {
         lw->attn_sub_norm[i] = 1.0f;
     }
     for (int i = 0; i < inter; i++) {
@@ -419,9 +418,164 @@ static int test_forward_pass(void) {
     return TEST_PASS;
 }
 
+/* ---- Test: F16 -> F32 conversion ---- */
+
+static int test_f16_to_f32(void) {
+    /* Test known FP16 bit patterns */
+    /* 0x0000 = 0.0 */
+    if (fabsf(f16_to_f32(0x0000) - 0.0f) > 1e-10f) return TEST_FAIL;
+    /* 0x3C00 = 1.0 */
+    if (fabsf(f16_to_f32(0x3C00) - 1.0f) > 1e-5f) return TEST_FAIL;
+    /* 0xBC00 = -1.0 */
+    if (fabsf(f16_to_f32(0xBC00) - (-1.0f)) > 1e-5f) return TEST_FAIL;
+    /* 0x3800 = 0.5 */
+    if (fabsf(f16_to_f32(0x3800) - 0.5f) > 1e-5f) return TEST_FAIL;
+    /* 0x4000 = 2.0 */
+    if (fabsf(f16_to_f32(0x4000) - 2.0f) > 1e-5f) return TEST_FAIL;
+    return TEST_PASS;
+}
+
+/* ---- Test: I2S decode ---- */
+
+static int test_i2s_decode(void) {
+    /* Pack known ternary values: -1, 0, 1, -1
+     * Encoding: 00=(-1), 01=(0), 10=(1), 00=(-1)
+     * byte = 0b00100100 = 0x24 */
+    uint8_t packed[] = {0x24};
+    int8_t out[4];
+    i2s_decode(packed, out, 4);
+
+    if (out[0] != -1) return TEST_FAIL;
+    if (out[1] !=  0) return TEST_FAIL;
+    if (out[2] !=  1) return TEST_FAIL;
+    if (out[3] != -1) return TEST_FAIL;
+    return TEST_PASS;
+}
+
+/* ---- Test: GGUF loading + forward pass ---- */
+
+static const char *gguf_model_path = NULL;
+
+static int test_gguf_load_forward(void) {
+    if (!gguf_model_path) {
+        printf("(skipped - no model file) ");
+        return TEST_PASS;
+    }
+
+    /* Read file */
+    FILE *f = fopen(gguf_model_path, "rb");
+    if (!f) {
+        fprintf(stderr, "  Cannot open: %s\n", gguf_model_path);
+        return TEST_FAIL;
+    }
+    fseek(f, 0, SEEK_END);
+    long file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    uint8_t *file_data = (uint8_t *)malloc(file_size);
+    if (!file_data) {
+        fclose(f);
+        fprintf(stderr, "  Cannot allocate %ld bytes\n", file_size);
+        return TEST_FAIL;
+    }
+    fread(file_data, 1, file_size, f);
+    fclose(f);
+
+    /* Parse GGUF */
+    gguf_context_t gguf;
+    if (gguf_parse(&gguf, file_data, file_size) != 0) {
+        free(file_data);
+        return TEST_FAIL;
+    }
+
+    /* Verify config */
+    if (gguf.hidden_size != 2560 || gguf.n_layers != 30 ||
+        gguf.n_heads != 20 || gguf.n_kv_heads != 5) {
+        fprintf(stderr, "  Unexpected config: hidden=%d layers=%d heads=%d kv=%d\n",
+                gguf.hidden_size, gguf.n_layers, gguf.n_heads, gguf.n_kv_heads);
+        gguf_free(&gguf);
+        free(file_data);
+        return TEST_FAIL;
+    }
+
+    /* Set up model with 1 layer only */
+    model_t model;
+    memset(&model, 0, sizeof(model));
+    model_config_from_gguf(&model.config, &gguf);
+    model.config.n_layers = 1;  /* Override to load only 1 layer */
+
+    if (model_alloc(&model) != 0) {
+        gguf_free(&gguf);
+        free(file_data);
+        return TEST_FAIL;
+    }
+
+    /* Load weights (1 layer) */
+    if (model_load_weights(&model, &gguf, file_data, 1) != 0) {
+        fprintf(stderr, "  Weight loading failed\n");
+        model_free(&model);
+        gguf_free(&gguf);
+        free(file_data);
+        return TEST_FAIL;
+    }
+
+    /* Forward pass with token 0 at position 0 */
+    float *logits = forward(&model, 0, 0);
+    if (!logits) {
+        fprintf(stderr, "  Forward pass returned NULL\n");
+        /* Free TL1 weight data */
+        layer_weights_t *lw = &model.layers[0];
+        free(lw->attn_q.indices); free(lw->attn_q.indices_col);
+        free(lw->attn_k.indices); free(lw->attn_k.indices_col);
+        free(lw->attn_v.indices); free(lw->attn_v.indices_col);
+        free(lw->attn_o.indices); free(lw->attn_o.indices_col);
+        free(lw->ffn_gate.indices); free(lw->ffn_gate.indices_col);
+        free(lw->ffn_up.indices); free(lw->ffn_up.indices_col);
+        free(lw->ffn_down.indices); free(lw->ffn_down.indices_col);
+        model_free(&model);
+        gguf_free(&gguf);
+        free(file_data);
+        return TEST_FAIL;
+    }
+
+    /* Check logits are finite */
+    int ok = 1;
+    int nan_count = 0, inf_count = 0;
+    for (int32_t i = 0; i < model.config.vocab_size; i++) {
+        if (isnan(logits[i])) { nan_count++; ok = 0; }
+        if (isinf(logits[i])) { inf_count++; ok = 0; }
+    }
+    if (!ok) {
+        fprintf(stderr, "  Logits: %d NaN, %d Inf out of %d\n",
+                nan_count, inf_count, model.config.vocab_size);
+    }
+
+    /* Check argmax is valid */
+    int32_t best = sample_argmax(logits, model.config.vocab_size);
+    printf("(token=%d, logit=%.4f) ", best, logits[best]);
+
+    /* Free TL1 weight data */
+    layer_weights_t *lw = &model.layers[0];
+    free(lw->attn_q.indices); free(lw->attn_q.indices_col);
+    free(lw->attn_k.indices); free(lw->attn_k.indices_col);
+    free(lw->attn_v.indices); free(lw->attn_v.indices_col);
+    free(lw->attn_o.indices); free(lw->attn_o.indices_col);
+    free(lw->ffn_gate.indices); free(lw->ffn_gate.indices_col);
+    free(lw->ffn_up.indices); free(lw->ffn_up.indices_col);
+    free(lw->ffn_down.indices); free(lw->ffn_down.indices_col);
+    model_free(&model);
+    gguf_free(&gguf);
+    free(file_data);
+
+    return ok ? TEST_PASS : TEST_FAIL;
+}
+
 /* ---- Main ---- */
 
-int main(void) {
+int main(int argc, char **argv) {
+    if (argc >= 2) {
+        gguf_model_path = argv[1];
+    }
     printf("===========================================\n");
     printf(" BitNet Inference Pipeline Tests\n");
     printf("===========================================\n\n");
@@ -448,8 +602,15 @@ int main(void) {
     RUN_TEST(argmax);
     RUN_TEST(top_p_deterministic);
 
+    printf("\n Weight loader:\n");
+    RUN_TEST(f16_to_f32);
+    RUN_TEST(i2s_decode);
+
     printf("\n Forward pass:\n");
     RUN_TEST(forward_pass);
+
+    printf("\n GGUF loading:\n");
+    RUN_TEST(gguf_load_forward);
 
     printf("\n===========================================\n");
     printf(" Results: %d/%d passed\n", tests_passed, tests_run);

@@ -51,6 +51,7 @@ typedef enum {
     GGML_TYPE_IQ1_M   = 29,
     GGML_TYPE_TQ1_0   = 34,
     GGML_TYPE_TQ2_0   = 35,
+    GGML_TYPE_I2_S    = 36,  /* BitNet I2_S: 2-bit ternary, 4 weights/byte */
 } ggml_type_t;
 
 /* GGUF metadata value types */

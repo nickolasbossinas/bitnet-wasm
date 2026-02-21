@@ -23,6 +23,10 @@ services:
         mkdir -p /src/build-native &&
         cd /src/build-native &&
         cmake .. -DCMAKE_BUILD_TYPE=Release &&
-        make -j\$(nproc) test_inference &&
-        ./test_inference
+        make -j\$(nproc) &&
+        if [ -f /src/models/ggml-model-i2_s.gguf ]; then
+          ./test_inference /src/models/ggml-model-i2_s.gguf;
+        else
+          ./test_inference;
+        fi
       "

@@ -16,6 +16,7 @@ set(INFERENCE_SOURCES
     src/inference/gguf.c
     src/inference/model.c
     src/inference/sampler.c
+    src/inference/weight_loader.c
 )
 
 # Benchmark
@@ -87,4 +88,8 @@ else()
     # Inference test executable
     add_executable(test_inference ${KERNEL_SOURCES} ${INFERENCE_SOURCES} ${TEST_SOURCES})
     target_link_libraries(test_inference m)
+
+    # GGUF inspector tool
+    add_executable(inspect_gguf src/inference/gguf.c src/test/inspect_gguf.c)
+    target_link_libraries(inspect_gguf m)
 endif()
