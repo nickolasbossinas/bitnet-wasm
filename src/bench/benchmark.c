@@ -1,6 +1,7 @@
 #include "../kernels/gemv.h"
 #include "../kernels/i2s.h"
 #include "../kernels/tl1.h"
+#include "../kernels/tl2.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,7 +14,7 @@
 /*
  * BitNet WASM SIMD Kernel Benchmark
  *
- * Tests all kernel variants (I2_S scalar/SIMD, TL1 scalar/SIMD)
+ * Tests all kernel variants (I2_S, TL1, TL2 — scalar and SIMD)
  * against the same random ternary weight matrix and activation vector.
  *
  * Reports:
@@ -70,10 +71,11 @@ static void print_header(int32_t M, int32_t K) {
     printf("===========================================\n");
     printf(" BitNet WASM SIMD Kernel Benchmark\n");
     printf("===========================================\n");
-    printf(" Matrix: %d x %d (%.1f KB packed I2S, %.1f KB packed TL1)\n",
+    printf(" Matrix: %d x %d (%.1f KB packed I2S, %.1f KB packed TL1, %.1f KB packed TL2)\n",
            M, K,
            (float)(M * ((K + 3) / 4)) / 1024.0f,
-           (float)(M * ((K / 2 + 1) / 2)) / 1024.0f);
+           (float)(M * ((K / 2 + 1) / 2)) / 1024.0f,
+           (float)(M * ((K / 3 + 1) / 2) * 2) / 1024.0f);
     printf(" Operations per GEMV: %lld\n", (long long)M * K * 2);
     printf(" Warmup: %d, Iterations: %d\n", NUM_WARMUP, NUM_ITERS);
     printf("-------------------------------------------\n");
@@ -112,7 +114,7 @@ int run_benchmark(int32_t M, int32_t K) {
         .data  = i2s_packed,
         .M     = M,
         .K     = K,
-        .scale = 1.0f   /* simplified: no per-tensor scale for benchmark */
+        .scale = 1.0f
     };
 
     /* Pack weights for TL1 */
@@ -130,6 +132,24 @@ int run_benchmark(int32_t M, int32_t K) {
     };
     tl1_transpose_weights(&tl1_w);
 
+    /* Pack weights for TL2 (requires K%6==0) */
+    int32_t tl2_triples = K / 3;
+    int32_t tl2_bytes = (tl2_triples + 1) / 2;
+    uint8_t *tl2_indices = (uint8_t *)calloc(M * tl2_bytes, sizeof(uint8_t));
+    uint8_t *tl2_signs   = (uint8_t *)calloc(M * tl2_bytes, sizeof(uint8_t));
+    tl2_pack_weights(raw_weights, tl2_indices, tl2_signs, M, K);
+
+    tl2_weight_t tl2_w = {
+        .indices     = tl2_indices,
+        .signs       = tl2_signs,
+        .indices_col = NULL,
+        .signs_col   = NULL,
+        .M           = M,
+        .K           = K,
+        .scale       = 1.0f
+    };
+    tl2_transpose_weights(&tl2_w);
+
     /* Output buffers */
     float *out_ref  = (float *)calloc(M, sizeof(float));
     float *out_test = (float *)calloc(M, sizeof(float));
@@ -140,9 +160,14 @@ int run_benchmark(int32_t M, int32_t K) {
 
     for (int32_t k = 0; k < KERNEL_COUNT; k++) {
         kernel_type_t kt = (kernel_type_t)k;
-        const void *w = (kt <= KERNEL_I2S_SIMD)
-                        ? (const void *)&i2s_w
-                        : (const void *)&tl1_w;
+        const void *w;
+        if (kt <= KERNEL_I2S_SIMD) {
+            w = (const void *)&i2s_w;
+        } else if (kt <= KERNEL_TL1_SIMD) {
+            w = (const void *)&tl1_w;
+        } else {
+            w = (const void *)&tl2_w;
+        }
 
         /* Warmup */
         for (int32_t iter = 0; iter < NUM_WARMUP; iter++) {
@@ -184,6 +209,10 @@ int run_benchmark(int32_t M, int32_t K) {
     free(i2s_packed);
     free(tl1_packed);
     free(tl1_w.indices_col);
+    free(tl2_indices);
+    free(tl2_signs);
+    free(tl2_w.indices_col);
+    free(tl2_w.signs_col);
     free(out_ref);
     free(out_test);
 
@@ -191,15 +220,15 @@ int run_benchmark(int32_t M, int32_t K) {
 }
 
 int main(void) {
-    /* Typical BitNet 2B layer dimensions */
-    printf(">>> Small test (256 x 256)\n");
-    run_benchmark(256, 256);
+    /* K must be divisible by 6 for TL2 (3 weights/triple × 2 triples/byte) */
+    printf(">>> Small test (256 x 252)\n");
+    run_benchmark(256, 252);
 
-    printf(">>> Medium test (2048 x 2048)\n");
-    run_benchmark(2048, 2048);
+    printf(">>> Medium test (2048 x 2046)\n");
+    run_benchmark(2048, 2046);
 
-    printf(">>> Large test (4096 x 2048) — typical FFN layer\n");
-    run_benchmark(4096, 2048);
+    printf(">>> Large test (4096 x 2046) — typical FFN layer\n");
+    run_benchmark(4096, 2046);
 
     return 0;
 }

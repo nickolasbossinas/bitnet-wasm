@@ -15,6 +15,8 @@ typedef enum {
     KERNEL_I2S_SIMD,
     KERNEL_TL1_SCALAR,
     KERNEL_TL1_SIMD,
+    KERNEL_TL2_SCALAR,
+    KERNEL_TL2_SIMD,
     KERNEL_COUNT
 } kernel_type_t;
 

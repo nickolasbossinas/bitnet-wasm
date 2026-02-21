@@ -57,6 +57,17 @@ typedef struct {
     float    scale;
 } tl1_weight_t;
 
+/* Packed weight matrix for TL2 kernel */
+typedef struct {
+    uint8_t *indices;      /* 4-bit unsigned indices, 2 per byte (nibble packed) */
+    uint8_t *signs;        /* 2 sign bits per byte (bit 0=even, bit 1=odd) */
+    uint8_t *indices_col;  /* column-major for SIMD */
+    uint8_t *signs_col;    /* column-major for SIMD */
+    int32_t  M;            /* rows */
+    int32_t  K;            /* cols (must be divisible by 6) */
+    float    scale;
+} tl2_weight_t;
+
 /* Activation vector (int8 quantized) */
 typedef struct {
     int8_t  *data;

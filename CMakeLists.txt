@@ -7,6 +7,7 @@ set(CMAKE_C_STANDARD 11)
 set(KERNEL_SOURCES
     src/kernels/i2s.c
     src/kernels/tl1.c
+    src/kernels/tl2.c
     src/kernels/gemv.c
 )
 

@@ -122,7 +122,7 @@
 <body>
     <h1>BitNet WASM SIMD Kernel Benchmark</h1>
     <p class="subtitle">
-        Ternary lookup table (TL1) and Int2 (I2_S) GEMV kernels
+        I2_S, TL1, and TL2 GEMV kernels
         compiled to WebAssembly with 128-bit SIMD
     </p>
 
@@ -135,7 +135,7 @@
         </div>
         <div class="input-group">
             <label>Cols (K)</label>
-            <input type="number" id="cols" value="2048" min="16" step="16">
+            <input type="number" id="cols" value="2046" min="6" step="6">
         </div>
         <button id="run-btn" onclick="runBenchmark()" disabled>Loading WASM...</button>
     </div>
@@ -223,8 +223,8 @@
             const M = parseInt(document.getElementById('rows').value) || 2048;
             const K = parseInt(document.getElementById('cols').value) || 2048;
 
-            // Ensure K is even (TL1 requires pairs)
-            const K_even = K % 2 === 0 ? K : K + 1;
+            // Ensure K is divisible by 6 (TL2 requires triples, TL1 requires pairs)
+            const K_aligned = K % 6 === 0 ? K : K - (K % 6) || 6;
 
             const statusEl = document.getElementById('status');
             const btnEl = document.getElementById('run-btn');
@@ -239,7 +239,7 @@
             setTimeout(() => {
                 try {
                     Module.ccall('run_benchmark', 'number',
-                                 ['number', 'number'], [M, K_even]);
+                                 ['number', 'number'], [M, K_aligned]);
                     statusEl.textContent = 'Done. Results above.';
                 } catch (e) {
                     statusEl.textContent = 'Benchmark failed: ' + e.message;

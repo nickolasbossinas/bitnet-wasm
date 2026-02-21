@@ -1,6 +1,7 @@
 #include "gemv.h"
 #include "i2s.h"
 #include "tl1.h"
+#include "tl2.h"
 #include <stdlib.h>
 #include <math.h>
 
@@ -25,6 +26,8 @@ const char *kernel_name(kernel_type_t type) {
         case KERNEL_I2S_SIMD:   return "I2_S (WASM SIMD)";
         case KERNEL_TL1_SCALAR: return "TL1 (scalar)";
         case KERNEL_TL1_SIMD:   return "TL1 (WASM SIMD)";
+        case KERNEL_TL2_SCALAR: return "TL2 (scalar)";
+        case KERNEL_TL2_SIMD:   return "TL2 (WASM SIMD)";
         default:                return "unknown";
     }
 }
@@ -91,6 +94,26 @@ double gemv_run(kernel_type_t kernel,
             } else {
                 t0 = get_time_ms();
                 tl1_gemv_simd((const tl1_weight_t *)weights, lut, &act, &out);
+                t1 = get_time_ms();
+            }
+
+            free(lut);
+            break;
+        }
+
+        case KERNEL_TL2_SCALAR:
+        case KERNEL_TL2_SIMD: {
+            int32_t lut_size = (K / 3) * 16;
+            int16_t *lut = (int16_t *)calloc(lut_size, sizeof(int16_t));
+            tl2_build_lut(lut, quant_act, K);
+
+            if (kernel == KERNEL_TL2_SCALAR) {
+                t0 = get_time_ms();
+                tl2_gemv_scalar((const tl2_weight_t *)weights, lut, &act, &out);
+                t1 = get_time_ms();
+            } else {
+                t0 = get_time_ms();
+                tl2_gemv_simd((const tl2_weight_t *)weights, lut, &act, &out);
                 t1 = get_time_ms();
             }
 
