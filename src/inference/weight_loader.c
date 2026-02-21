@@ -46,21 +46,45 @@ float f16_to_f32(uint16_t h) {
 /* --- I2_S decoder --- */
 
 void i2s_decode(const uint8_t *data, int8_t *out, int64_t n_elements) {
-    int64_t full_bytes = n_elements / 4;
-    int64_t remainder = n_elements % 4;
+    /*
+     * I2_S format: 4 groups of QK/4 weights interleaved within each byte.
+     * Within blocks of QK_I2S=128 weights (32 bytes):
+     *   - Byte b, bits 6-7: weight at group 0, position b  (weight[b])
+     *   - Byte b, bits 4-5: weight at group 1, position b  (weight[32+b])
+     *   - Byte b, bits 2-3: weight at group 2, position b  (weight[64+b])
+     *   - Byte b, bits 0-1: weight at group 3, position b  (weight[96+b])
+     * Each 2-bit code maps: 0 -> -1, 1 -> 0, 2 -> +1
+     */
+    int64_t QK = 128;  /* weights per interleaving block */
+    int64_t BPB = 32;  /* bytes per block (QK / 4) */
+    int64_t n_blocks = n_elements / QK;
+    int64_t tail = n_elements % QK;
 
-    for (int64_t i = 0; i < full_bytes; i++) {
-        uint8_t byte = data[i];
-        out[i * 4 + 0] = (int8_t)((byte >> 0) & 0x03) - 1;
-        out[i * 4 + 1] = (int8_t)((byte >> 2) & 0x03) - 1;
-        out[i * 4 + 2] = (int8_t)((byte >> 4) & 0x03) - 1;
-        out[i * 4 + 3] = (int8_t)((byte >> 6) & 0x03) - 1;
+    for (int64_t blk = 0; blk < n_blocks; blk++) {
+        const uint8_t *blk_data = &data[blk * BPB];
+        int8_t *blk_out = &out[blk * QK];
+
+        for (int32_t b = 0; b < BPB; b++) {
+            uint8_t byte = blk_data[b];
+            blk_out[0 * BPB + b] = (int8_t)((byte >> 6) & 0x03) - 1;
+            blk_out[1 * BPB + b] = (int8_t)((byte >> 4) & 0x03) - 1;
+            blk_out[2 * BPB + b] = (int8_t)((byte >> 2) & 0x03) - 1;
+            blk_out[3 * BPB + b] = (int8_t)((byte >> 0) & 0x03) - 1;
+        }
     }
 
-    if (remainder > 0) {
-        uint8_t byte = data[full_bytes];
-        for (int64_t j = 0; j < remainder; j++) {
-            out[full_bytes * 4 + j] = (int8_t)((byte >> (j * 2)) & 0x03) - 1;
+    /* Handle tail elements (< 128) with simple MSB-first sequential decode */
+    if (tail > 0) {
+        int64_t tail_offset = n_blocks * QK;
+        int64_t tail_bytes = (tail + 3) / 4;
+        const uint8_t *tail_data = &data[n_blocks * BPB];
+        int64_t idx = 0;
+        for (int64_t i = 0; i < tail_bytes && idx < tail; i++) {
+            uint8_t byte = tail_data[i];
+            if (idx < tail) out[tail_offset + idx++] = (int8_t)((byte >> 6) & 0x03) - 1;
+            if (idx < tail) out[tail_offset + idx++] = (int8_t)((byte >> 4) & 0x03) - 1;
+            if (idx < tail) out[tail_offset + idx++] = (int8_t)((byte >> 2) & 0x03) - 1;
+            if (idx < tail) out[tail_offset + idx++] = (int8_t)((byte >> 0) & 0x03) - 1;
         }
     }
 }
@@ -161,6 +185,14 @@ static int load_tl1_weight(tl1_weight_t *w,
     const uint8_t *src = (const uint8_t *)gguf_tensor_data(gguf, t, file_data);
     i2s_decode(src, raw, n_elements);
 
+    /* Read per-tensor scale factor appended after packed I2_S data.
+     * I2_S format: [ceil(n/4) bytes of packed 2-bit data] [float32 scale]
+     * The scale = max(|original_weights|) from the quantization step.
+     */
+    int64_t packed_bytes = (n_elements + 3) / 4;
+    float i2s_scale;
+    memcpy(&i2s_scale, &src[packed_bytes], sizeof(float));
+
     /* Pack into TL1 format */
     int32_t pairs = K / 2;
     int32_t bytes_per_row = (pairs + 1) / 2;
@@ -168,7 +200,7 @@ static int load_tl1_weight(tl1_weight_t *w,
     w->indices_col = NULL;
     w->M = M;
     w->K = K;
-    w->scale = 1.0f;
+    w->scale = i2s_scale;
 
     if (!w->indices) {
         free(raw);
@@ -193,16 +225,16 @@ int model_load_weights(model_t *model, const gguf_context_t *gguf,
     int32_t n_layers = (n_layers_to_load > 0 && n_layers_to_load < c->n_layers)
                        ? n_layers_to_load : c->n_layers;
 
-    printf("weight_loader: loading %d/%d layers (dim=%d, inter=%d, kv_dim=%d)\n",
-           n_layers, c->n_layers, dim, inter, kv_dim);
+    fprintf(stderr, "weight_loader: loading %d/%d layers (dim=%d, inter=%d, kv_dim=%d)\n",
+            n_layers, c->n_layers, dim, inter, kv_dim);
 
     /* Load token embedding (F16 -> F32) */
     int64_t emb_size = (int64_t)c->vocab_size * dim;
     model->token_embedding = load_f16_as_f32(gguf, file_data,
                                               "token_embd.weight", emb_size);
     if (!model->token_embedding) return -1;
-    printf("weight_loader: loaded token_embd.weight (%.1f MB)\n",
-           emb_size * 4.0f / (1024.0f * 1024.0f));
+    fprintf(stderr, "weight_loader: loaded token_embd.weight (%.1f MB)\n",
+            emb_size * 4.0f / (1024.0f * 1024.0f));
 
     /* Load output norm (F32) */
     model->output_norm = load_f32_tensor(gguf, file_data,
@@ -214,7 +246,7 @@ int model_load_weights(model_t *model, const gguf_context_t *gguf,
         layer_weights_t *lw = &model->layers[l];
         char name[128];
 
-        printf("weight_loader: loading layer %d/%d...\n", l, n_layers);
+        fprintf(stderr, "weight_loader: loading layer %d/%d...\n", l, n_layers);
 
         /* Norm weights (F32) */
         snprintf(name, sizeof(name), "blk.%d.attn_norm.weight", l);
@@ -262,9 +294,9 @@ int model_load_weights(model_t *model, const gguf_context_t *gguf,
         if (load_tl1_weight(&lw->ffn_down, gguf, file_data, name, dim, inter) != 0)
             return -1;
 
-        printf("weight_loader: layer %d loaded\n", l);
+        fprintf(stderr, "weight_loader: layer %d loaded\n", l);
     }
 
-    printf("weight_loader: all weights loaded successfully\n");
+    fprintf(stderr, "weight_loader: all weights loaded successfully\n");
     return 0;
 }

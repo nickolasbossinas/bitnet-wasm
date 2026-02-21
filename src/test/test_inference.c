@@ -440,17 +440,62 @@ static int test_f16_to_f32(void) {
 /* ---- Test: I2S decode ---- */
 
 static int test_i2s_decode(void) {
-    /* Pack known ternary values: -1, 0, 1, -1
-     * Encoding: 00=(-1), 01=(0), 10=(1), 00=(-1)
-     * byte = 0b00100100 = 0x24 */
-    uint8_t packed[] = {0x24};
-    int8_t out[4];
-    i2s_decode(packed, out, 4);
+    /*
+     * I2_S interleaved format: within 128-weight blocks (32 bytes),
+     * each byte packs 4 weights from different groups:
+     *   bits 6-7: group 0 (weights 0-31)
+     *   bits 4-5: group 1 (weights 32-63)
+     *   bits 2-3: group 2 (weights 64-95)
+     *   bits 0-1: group 3 (weights 96-127)
+     *
+     * Value encoding: 00=-1, 01=0, 10=+1
+     *
+     * Test with a full 128-weight block (32 bytes).
+     * Set byte 0 to pack: group0[0]=-1(00), group1[0]=0(01),
+     *                      group2[0]=+1(10), group3[0]=-1(00)
+     * Byte = (00 << 6) | (01 << 4) | (10 << 2) | (00 << 0)
+     *      = 0x00 | 0x10 | 0x08 | 0x00 = 0x18
+     */
+    uint8_t packed[32];
+    memset(packed, 0x00, 32);  /* all weights = -1 (code 00 in all positions) */
 
-    if (out[0] != -1) return TEST_FAIL;
-    if (out[1] !=  0) return TEST_FAIL;
-    if (out[2] !=  1) return TEST_FAIL;
-    if (out[3] != -1) return TEST_FAIL;
+    /* Set byte 0: group0=-1(00), group1=0(01), group2=+1(10), group3=-1(00)
+     * = 0b00_01_10_00 = 0x18 (MSB to LSB: g0=00, g1=01, g2=10, g3=00) */
+    packed[0] = (0 << 6) | (1 << 4) | (2 << 2) | (0 << 0);  /* 0x18 */
+
+    /* Set byte 1: all zero weights = code 01 in all positions
+     * = (01 << 6) | (01 << 4) | (01 << 2) | (01 << 0) = 0x55 */
+    packed[1] = 0x55;
+
+    int8_t out[128];
+    i2s_decode(packed, out, 128);
+
+    /* Byte 0 decodes to:
+     *   out[0]  (group0, pos 0) = bits 6-7 = 00 → -1
+     *   out[32] (group1, pos 0) = bits 4-5 = 01 → 0
+     *   out[64] (group2, pos 0) = bits 2-3 = 10 → +1
+     *   out[96] (group3, pos 0) = bits 0-1 = 00 → -1
+     */
+    if (out[0]  != -1) return TEST_FAIL;
+    if (out[32] !=  0) return TEST_FAIL;
+    if (out[64] !=  1) return TEST_FAIL;
+    if (out[96] != -1) return TEST_FAIL;
+
+    /* Byte 1 decodes to:
+     *   out[1]  (group0, pos 1) = bits 6-7 = 01 → 0
+     *   out[33] (group1, pos 1) = bits 4-5 = 01 → 0
+     *   out[65] (group2, pos 1) = bits 2-3 = 01 → 0
+     *   out[97] (group3, pos 1) = bits 0-1 = 01 → 0
+     */
+    if (out[1]  != 0) return TEST_FAIL;
+    if (out[33] != 0) return TEST_FAIL;
+    if (out[65] != 0) return TEST_FAIL;
+    if (out[97] != 0) return TEST_FAIL;
+
+    /* Remaining bytes are 0x00 = all code 00 = all -1 */
+    if (out[2] != -1) return TEST_FAIL;
+    if (out[34] != -1) return TEST_FAIL;
+
     return TEST_PASS;
 }
 

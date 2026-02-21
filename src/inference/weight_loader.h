@@ -23,9 +23,21 @@ float f16_to_f32(uint16_t h);
 /*
  * Decode I2_S packed ternary weights to int8 {-1, 0, 1}.
  *
- * I2_S encoding (2 bits per weight, 4 per byte, LSB first):
- *   00 = -1, 01 = 0, 10 = +1, 11 = unused
- *   byte = w0 | (w1 << 2) | (w2 << 4) | (w3 << 6)
+ * I2_S encoding (GGML_TYPE_I2_S = 36, used by BitNet b1.58):
+ *   Value codes: 00 = -1, 01 = 0, 10 = +1
+ *
+ * Layout: interleaved 128-weight blocks (32 bytes each).
+ * Within each block, each byte packs 4 weights from different groups:
+ *   bits 6-7: group 0 (weights 0..31)
+ *   bits 4-5: group 1 (weights 32..63)
+ *   bits 2-3: group 2 (weights 64..95)
+ *   bits 0-1: group 3 (weights 96..127)
+ *
+ * Tail elements (< 128) are packed MSB-first sequentially.
+ *
+ * A per-tensor float32 scale factor is appended at byte offset
+ * ceil(n_elements/4) after the packed data. The caller (load_tl1_weight)
+ * reads this scale and stores it in tl1_weight_t.scale.
  *
  * data:       packed I2_S bytes
  * out:        output int8 array, length n_elements
