@@ -11,3 +11,18 @@ services:
         emcmake cmake .. -DCMAKE_BUILD_TYPE=Release &&
         emmake make
       "
+
+  test:
+    image: gcc:latest
+    volumes:
+      - ../:/src
+    working_dir: /src/build-native
+    command: >
+      bash -c "
+        apt-get update -qq && apt-get install -y -qq cmake > /dev/null 2>&1 &&
+        mkdir -p /src/build-native &&
+        cd /src/build-native &&
+        cmake .. -DCMAKE_BUILD_TYPE=Release &&
+        make -j\$(nproc) test_inference &&
+        ./test_inference
+      "

@@ -11,9 +11,21 @@ set(KERNEL_SOURCES
     src/kernels/gemv.c
 )
 
+# Inference sources
+set(INFERENCE_SOURCES
+    src/inference/gguf.c
+    src/inference/model.c
+    src/inference/sampler.c
+)
+
 # Benchmark
 set(BENCH_SOURCES
     src/bench/benchmark.c
+)
+
+# Inference tests
+set(TEST_SOURCES
+    src/test/test_inference.c
 )
 
 if(EMSCRIPTEN)
@@ -71,4 +83,8 @@ else()
 
     add_executable(benchmark ${KERNEL_SOURCES} ${BENCH_SOURCES})
     target_link_libraries(benchmark m)  # libm for math functions
+
+    # Inference test executable
+    add_executable(test_inference ${KERNEL_SOURCES} ${INFERENCE_SOURCES} ${TEST_SOURCES})
+    target_link_libraries(test_inference m)
 endif()
