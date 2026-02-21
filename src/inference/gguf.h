@@ -81,6 +81,20 @@ typedef struct {
     uint64_t size_bytes;  /* computed total size */
 } gguf_tensor_info_t;
 
+/* Tokenizer metadata extracted from GGUF KV pairs */
+typedef struct {
+    char    **tokens;          /* [vocab_size] token strings (owned) */
+    int32_t  *token_types;     /* [vocab_size] 1=normal, 3=special */
+    int32_t   vocab_size;
+    char    **merges;          /* [n_merges] "tokenA tokenB" strings (owned) */
+    int32_t   n_merges;
+    int32_t   bos_token_id;
+    int32_t   eos_token_id;
+    int32_t   add_bos;
+    int32_t   add_eos;
+    char     *model_type;      /* "gpt2", "llama", etc. */
+} gguf_tokenizer_t;
+
 /* Parsed GGUF context */
 typedef struct {
     uint32_t version;
@@ -104,6 +118,9 @@ typedef struct {
     int32_t  max_seq_len;
     float    rope_theta;
     float    rms_norm_eps;
+
+    /* Tokenizer data */
+    gguf_tokenizer_t tokenizer;
 } gguf_context_t;
 
 /*

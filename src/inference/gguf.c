@@ -178,6 +178,10 @@ int gguf_parse(gguf_context_t *ctx, const uint8_t *data, size_t size) {
     ctx->rope_theta = 500000.0f;
     ctx->rms_norm_eps = 1e-5f;
     ctx->max_seq_len = 4096;
+    ctx->tokenizer.bos_token_id = -1;
+    ctx->tokenizer.eos_token_id = -1;
+    ctx->tokenizer.add_bos = 1;
+    ctx->tokenizer.add_eos = 0;
 
     /* Parse metadata KV pairs */
     for (uint64_t i = 0; i < ctx->n_kv; i++) {
@@ -209,19 +213,57 @@ int gguf_parse(gguf_context_t *ctx, const uint8_t *data, size_t size) {
         } else if (strstr(key, ".context_length") != NULL) {
             ctx->max_seq_len = (int32_t)read_u32(&c);
         } else if (strcmp(key, "tokenizer.ggml.tokens") == 0) {
-            /* Array of strings — count gives vocab size */
-            /* Type should be GGUF_TYPE_ARRAY */
             if (value_type == GGUF_TYPE_ARRAY) {
                 uint32_t arr_type = read_u32(&c);
                 uint64_t arr_len = read_u64(&c);
                 ctx->vocab_size = (int32_t)arr_len;
-                /* Skip the actual token strings */
+                ctx->tokenizer.vocab_size = (int32_t)arr_len;
+                ctx->tokenizer.tokens = (char **)calloc(arr_len, sizeof(char *));
+                if (!ctx->tokenizer.tokens) { free(key); return -1; }
                 for (uint64_t j = 0; j < arr_len; j++) {
-                    if (skip_value(&c, arr_type) != 0) { free(key); return -1; }
+                    ctx->tokenizer.tokens[j] = read_string(&c);
+                    if (!ctx->tokenizer.tokens[j]) { free(key); return -1; }
                 }
             } else {
                 skip_value(&c, value_type);
             }
+        } else if (strcmp(key, "tokenizer.ggml.merges") == 0) {
+            if (value_type == GGUF_TYPE_ARRAY) {
+                uint32_t arr_type = read_u32(&c);
+                uint64_t arr_len = read_u64(&c);
+                ctx->tokenizer.n_merges = (int32_t)arr_len;
+                ctx->tokenizer.merges = (char **)calloc(arr_len, sizeof(char *));
+                if (!ctx->tokenizer.merges) { free(key); return -1; }
+                for (uint64_t j = 0; j < arr_len; j++) {
+                    ctx->tokenizer.merges[j] = read_string(&c);
+                    if (!ctx->tokenizer.merges[j]) { free(key); return -1; }
+                }
+            } else {
+                skip_value(&c, value_type);
+            }
+        } else if (strcmp(key, "tokenizer.ggml.token_type") == 0) {
+            if (value_type == GGUF_TYPE_ARRAY) {
+                uint32_t arr_type = read_u32(&c);
+                uint64_t arr_len = read_u64(&c);
+                ctx->tokenizer.token_types = (int32_t *)calloc(arr_len, sizeof(int32_t));
+                if (!ctx->tokenizer.token_types) { free(key); return -1; }
+                for (uint64_t j = 0; j < arr_len; j++) {
+                    ctx->tokenizer.token_types[j] = (int32_t)read_u32(&c);
+                }
+                (void)arr_type;
+            } else {
+                skip_value(&c, value_type);
+            }
+        } else if (strcmp(key, "tokenizer.ggml.bos_token_id") == 0) {
+            ctx->tokenizer.bos_token_id = (int32_t)read_u32(&c);
+        } else if (strcmp(key, "tokenizer.ggml.eos_token_id") == 0) {
+            ctx->tokenizer.eos_token_id = (int32_t)read_u32(&c);
+        } else if (strcmp(key, "tokenizer.ggml.add_bos_token") == 0) {
+            ctx->tokenizer.add_bos = (int32_t)read_u8(&c);
+        } else if (strcmp(key, "tokenizer.ggml.add_eos_token") == 0) {
+            ctx->tokenizer.add_eos = (int32_t)read_u8(&c);
+        } else if (strcmp(key, "tokenizer.ggml.model") == 0) {
+            ctx->tokenizer.model_type = read_string(&c);
         } else {
             /* Skip values we don't need */
             if (skip_value(&c, value_type) != 0) {
@@ -281,6 +323,21 @@ void gguf_free(gguf_context_t *ctx) {
         }
         free(ctx->tensors);
     }
+    /* Free tokenizer data */
+    if (ctx->tokenizer.tokens) {
+        for (int32_t i = 0; i < ctx->tokenizer.vocab_size; i++) {
+            free(ctx->tokenizer.tokens[i]);
+        }
+        free(ctx->tokenizer.tokens);
+    }
+    if (ctx->tokenizer.merges) {
+        for (int32_t i = 0; i < ctx->tokenizer.n_merges; i++) {
+            free(ctx->tokenizer.merges[i]);
+        }
+        free(ctx->tokenizer.merges);
+    }
+    free(ctx->tokenizer.token_types);
+    free(ctx->tokenizer.model_type);
     memset(ctx, 0, sizeof(*ctx));
 }
 

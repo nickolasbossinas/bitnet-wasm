@@ -77,6 +77,40 @@ int main(int argc, char **argv) {
                t->size_bytes / 1024.0);
     }
 
+    printf("\n--- Tokenizer ---\n");
+    printf("model_type=%s\n", ctx.tokenizer.model_type ? ctx.tokenizer.model_type : "(none)");
+    printf("vocab_size=%d, n_merges=%d\n", ctx.tokenizer.vocab_size, ctx.tokenizer.n_merges);
+    printf("bos_token_id=%d, eos_token_id=%d\n",
+           ctx.tokenizer.bos_token_id, ctx.tokenizer.eos_token_id);
+    printf("add_bos=%d, add_eos=%d\n", ctx.tokenizer.add_bos, ctx.tokenizer.add_eos);
+
+    if (ctx.tokenizer.tokens) {
+        int n = ctx.tokenizer.vocab_size < 10 ? ctx.tokenizer.vocab_size : 10;
+        printf("\nFirst %d tokens:\n", n);
+        for (int i = 0; i < n; i++) {
+            printf("  [%d] type=%d \"%s\"\n", i,
+                   ctx.tokenizer.token_types ? ctx.tokenizer.token_types[i] : -1,
+                   ctx.tokenizer.tokens[i]);
+        }
+        /* Show BOS/EOS tokens */
+        if (ctx.tokenizer.bos_token_id >= 0 && ctx.tokenizer.bos_token_id < ctx.tokenizer.vocab_size) {
+            printf("  BOS [%d] \"%s\"\n", ctx.tokenizer.bos_token_id,
+                   ctx.tokenizer.tokens[ctx.tokenizer.bos_token_id]);
+        }
+        if (ctx.tokenizer.eos_token_id >= 0 && ctx.tokenizer.eos_token_id < ctx.tokenizer.vocab_size) {
+            printf("  EOS [%d] \"%s\"\n", ctx.tokenizer.eos_token_id,
+                   ctx.tokenizer.tokens[ctx.tokenizer.eos_token_id]);
+        }
+    }
+
+    if (ctx.tokenizer.merges) {
+        int n = ctx.tokenizer.n_merges < 5 ? ctx.tokenizer.n_merges : 5;
+        printf("\nFirst %d merges:\n", n);
+        for (int i = 0; i < n; i++) {
+            printf("  [%d] \"%s\"\n", i, ctx.tokenizer.merges[i]);
+        }
+    }
+
     printf("\n--- Summary ---\n");
     printf("Data offset: %llu\n", (unsigned long long)ctx.data_offset);
     printf("File size:   %ld\n", file_size);

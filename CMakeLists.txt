@@ -17,6 +17,7 @@ set(INFERENCE_SOURCES
     src/inference/model.c
     src/inference/sampler.c
     src/inference/weight_loader.c
+    src/inference/tokenizer.c
 )
 
 # Benchmark

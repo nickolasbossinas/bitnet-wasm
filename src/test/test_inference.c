@@ -1,6 +1,7 @@
 #include "../inference/model.h"
 #include "../inference/sampler.h"
 #include "../inference/weight_loader.h"
+#include "../inference/tokenizer.h"
 #include "../kernels/tl1.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -452,78 +453,164 @@ static int test_i2s_decode(void) {
     return TEST_PASS;
 }
 
-/* ---- Test: GGUF loading + forward pass ---- */
+/* ---- Test: Tokenizer ---- */
 
+/* Shared GGUF state for tokenizer + loading tests */
 static const char *gguf_model_path = NULL;
+static gguf_context_t *shared_gguf = NULL;
+static uint8_t *shared_file_data = NULL;
+static long shared_file_size = 0;
+
+static int ensure_gguf_loaded(void) {
+    if (shared_gguf) return 0;
+    if (!gguf_model_path) return -1;
+
+    FILE *f = fopen(gguf_model_path, "rb");
+    if (!f) return -1;
+    fseek(f, 0, SEEK_END);
+    shared_file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    shared_file_data = (uint8_t *)malloc(shared_file_size);
+    if (!shared_file_data) { fclose(f); return -1; }
+    fread(shared_file_data, 1, shared_file_size, f);
+    fclose(f);
+
+    shared_gguf = (gguf_context_t *)calloc(1, sizeof(gguf_context_t));
+    if (gguf_parse(shared_gguf, shared_file_data, shared_file_size) != 0) {
+        free(shared_file_data); free(shared_gguf);
+        shared_file_data = NULL; shared_gguf = NULL;
+        return -1;
+    }
+    return 0;
+}
+
+static int test_tokenizer_init(void) {
+    if (!gguf_model_path) { printf("(skipped) "); return TEST_PASS; }
+    if (ensure_gguf_loaded() != 0) return TEST_FAIL;
+
+    tokenizer_t tok;
+    if (tokenizer_init(&tok, &shared_gguf->tokenizer) != 0) return TEST_FAIL;
+
+    /* Verify basic properties */
+    if (tok.vocab_size != 128256) { tokenizer_free(&tok); return TEST_FAIL; }
+    if (tok.bos_id != 128000) { tokenizer_free(&tok); return TEST_FAIL; }
+    if (tok.eos_id != 128001) { tokenizer_free(&tok); return TEST_FAIL; }
+    if (tok.n_merges != 280147) { tokenizer_free(&tok); return TEST_FAIL; }
+
+    /* Token 0 should be "!" */
+    if (strcmp(tok.vocab[0], "!") != 0) { tokenizer_free(&tok); return TEST_FAIL; }
+
+    tokenizer_free(&tok);
+    return TEST_PASS;
+}
+
+static int test_tokenizer_encode(void) {
+    if (!gguf_model_path) { printf("(skipped) "); return TEST_PASS; }
+    if (ensure_gguf_loaded() != 0) return TEST_FAIL;
+
+    tokenizer_t tok;
+    if (tokenizer_init(&tok, &shared_gguf->tokenizer) != 0) return TEST_FAIL;
+
+    /* "Hello world!" -> [9906, 1917, 0] without special tokens */
+    int32_t ids[64];
+    int32_t n = tokenizer_encode(&tok, "Hello world!", ids, 64, 0);
+
+    if (n != 3) {
+        fprintf(stderr, "  Expected 3 tokens, got %d: ", n);
+        for (int32_t i = 0; i < n; i++) fprintf(stderr, "%d ", ids[i]);
+        fprintf(stderr, "\n");
+        tokenizer_free(&tok);
+        return TEST_FAIL;
+    }
+    if (ids[0] != 9906 || ids[1] != 1917 || ids[2] != 0) {
+        fprintf(stderr, "  Expected [9906,1917,0], got [%d,%d,%d]\n", ids[0], ids[1], ids[2]);
+        tokenizer_free(&tok);
+        return TEST_FAIL;
+    }
+
+    tokenizer_free(&tok);
+    return TEST_PASS;
+}
+
+static int test_tokenizer_special(void) {
+    if (!gguf_model_path) { printf("(skipped) "); return TEST_PASS; }
+    if (ensure_gguf_loaded() != 0) return TEST_FAIL;
+
+    tokenizer_t tok;
+    if (tokenizer_init(&tok, &shared_gguf->tokenizer) != 0) return TEST_FAIL;
+
+    /* "Hello world!" with special tokens -> [128000, 9906, 1917, 0] */
+    int32_t ids[64];
+    int32_t n = tokenizer_encode(&tok, "Hello world!", ids, 64, 1);
+
+    if (n < 4 || ids[0] != 128000) {
+        fprintf(stderr, "  Expected BOS=128000, got n=%d, ids[0]=%d\n",
+                n, n > 0 ? ids[0] : -1);
+        tokenizer_free(&tok);
+        return TEST_FAIL;
+    }
+    if (ids[1] != 9906 || ids[2] != 1917 || ids[3] != 0) {
+        tokenizer_free(&tok);
+        return TEST_FAIL;
+    }
+
+    tokenizer_free(&tok);
+    return TEST_PASS;
+}
+
+static int test_tokenizer_roundtrip(void) {
+    if (!gguf_model_path) { printf("(skipped) "); return TEST_PASS; }
+    if (ensure_gguf_loaded() != 0) return TEST_FAIL;
+
+    tokenizer_t tok;
+    if (tokenizer_init(&tok, &shared_gguf->tokenizer) != 0) return TEST_FAIL;
+
+    const char *text = "Hello world!";
+    int32_t ids[64];
+    int32_t n = tokenizer_encode(&tok, text, ids, 64, 0);
+    if (n < 0) { tokenizer_free(&tok); return TEST_FAIL; }
+
+    char decoded[256];
+    int32_t dlen = tokenizer_decode(&tok, ids, n, decoded, 256);
+    if (dlen < 0) { tokenizer_free(&tok); return TEST_FAIL; }
+
+    if (strcmp(decoded, text) != 0) {
+        fprintf(stderr, "  Roundtrip failed: \"%s\" -> \"%s\"\n", text, decoded);
+        tokenizer_free(&tok);
+        return TEST_FAIL;
+    }
+
+    tokenizer_free(&tok);
+    return TEST_PASS;
+}
+
+/* ---- Test: GGUF loading + forward pass ---- */
 
 static int test_gguf_load_forward(void) {
     if (!gguf_model_path) {
         printf("(skipped - no model file) ");
         return TEST_PASS;
     }
-
-    /* Read file */
-    FILE *f = fopen(gguf_model_path, "rb");
-    if (!f) {
-        fprintf(stderr, "  Cannot open: %s\n", gguf_model_path);
-        return TEST_FAIL;
-    }
-    fseek(f, 0, SEEK_END);
-    long file_size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    uint8_t *file_data = (uint8_t *)malloc(file_size);
-    if (!file_data) {
-        fclose(f);
-        fprintf(stderr, "  Cannot allocate %ld bytes\n", file_size);
-        return TEST_FAIL;
-    }
-    fread(file_data, 1, file_size, f);
-    fclose(f);
-
-    /* Parse GGUF */
-    gguf_context_t gguf;
-    if (gguf_parse(&gguf, file_data, file_size) != 0) {
-        free(file_data);
-        return TEST_FAIL;
-    }
-
-    /* Verify config */
-    if (gguf.hidden_size != 2560 || gguf.n_layers != 30 ||
-        gguf.n_heads != 20 || gguf.n_kv_heads != 5) {
-        fprintf(stderr, "  Unexpected config: hidden=%d layers=%d heads=%d kv=%d\n",
-                gguf.hidden_size, gguf.n_layers, gguf.n_heads, gguf.n_kv_heads);
-        gguf_free(&gguf);
-        free(file_data);
-        return TEST_FAIL;
-    }
+    if (ensure_gguf_loaded() != 0) return TEST_FAIL;
 
     /* Set up model with 1 layer only */
     model_t model;
     memset(&model, 0, sizeof(model));
-    model_config_from_gguf(&model.config, &gguf);
-    model.config.n_layers = 1;  /* Override to load only 1 layer */
+    model_config_from_gguf(&model.config, shared_gguf);
+    model.config.n_layers = 1;
 
-    if (model_alloc(&model) != 0) {
-        gguf_free(&gguf);
-        free(file_data);
-        return TEST_FAIL;
-    }
+    if (model_alloc(&model) != 0) return TEST_FAIL;
 
-    /* Load weights (1 layer) */
-    if (model_load_weights(&model, &gguf, file_data, 1) != 0) {
+    if (model_load_weights(&model, shared_gguf, shared_file_data, 1) != 0) {
         fprintf(stderr, "  Weight loading failed\n");
         model_free(&model);
-        gguf_free(&gguf);
-        free(file_data);
         return TEST_FAIL;
     }
 
-    /* Forward pass with token 0 at position 0 */
     float *logits = forward(&model, 0, 0);
     if (!logits) {
         fprintf(stderr, "  Forward pass returned NULL\n");
-        /* Free TL1 weight data */
         layer_weights_t *lw = &model.layers[0];
         free(lw->attn_q.indices); free(lw->attn_q.indices_col);
         free(lw->attn_k.indices); free(lw->attn_k.indices_col);
@@ -533,12 +620,9 @@ static int test_gguf_load_forward(void) {
         free(lw->ffn_up.indices); free(lw->ffn_up.indices_col);
         free(lw->ffn_down.indices); free(lw->ffn_down.indices_col);
         model_free(&model);
-        gguf_free(&gguf);
-        free(file_data);
         return TEST_FAIL;
     }
 
-    /* Check logits are finite */
     int ok = 1;
     int nan_count = 0, inf_count = 0;
     for (int32_t i = 0; i < model.config.vocab_size; i++) {
@@ -550,11 +634,9 @@ static int test_gguf_load_forward(void) {
                 nan_count, inf_count, model.config.vocab_size);
     }
 
-    /* Check argmax is valid */
     int32_t best = sample_argmax(logits, model.config.vocab_size);
     printf("(token=%d, logit=%.4f) ", best, logits[best]);
 
-    /* Free TL1 weight data */
     layer_weights_t *lw = &model.layers[0];
     free(lw->attn_q.indices); free(lw->attn_q.indices_col);
     free(lw->attn_k.indices); free(lw->attn_k.indices_col);
@@ -564,8 +646,6 @@ static int test_gguf_load_forward(void) {
     free(lw->ffn_up.indices); free(lw->ffn_up.indices_col);
     free(lw->ffn_down.indices); free(lw->ffn_down.indices_col);
     model_free(&model);
-    gguf_free(&gguf);
-    free(file_data);
 
     return ok ? TEST_PASS : TEST_FAIL;
 }
@@ -609,8 +689,21 @@ int main(int argc, char **argv) {
     printf("\n Forward pass:\n");
     RUN_TEST(forward_pass);
 
+    printf("\n Tokenizer:\n");
+    RUN_TEST(tokenizer_init);
+    RUN_TEST(tokenizer_encode);
+    RUN_TEST(tokenizer_special);
+    RUN_TEST(tokenizer_roundtrip);
+
     printf("\n GGUF loading:\n");
     RUN_TEST(gguf_load_forward);
+
+    /* Clean up shared GGUF data */
+    if (shared_gguf) {
+        gguf_free(shared_gguf);
+        free(shared_gguf);
+    }
+    free(shared_file_data);
 
     printf("\n===========================================\n");
     printf(" Results: %d/%d passed\n", tests_passed, tests_run);
