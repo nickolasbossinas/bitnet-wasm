@@ -5,7 +5,7 @@
  * Communicates via postMessage:
  *
  * Inbound:
- *   {type: 'load', buffer: ArrayBuffer, n_layers: number}
+ *   {type: 'load', buffer: ArrayBuffer, n_layers: number, n_threads: number}
  *   {type: 'generate', prompt, max_tokens, temperature, top_p, seed, repetition_penalty}
  *
  * Outbound:
@@ -38,7 +38,7 @@ async function initModule() {
     }
 }
 
-async function loadModel(buffer, nLayers) {
+async function loadModel(buffer, nLayers, nThreads) {
     try {
         const size = buffer.byteLength;
         self.postMessage({
@@ -62,7 +62,7 @@ async function loadModel(buffer, nLayers) {
 
         self.postMessage({ type: 'progress', message: 'Parsing GGUF and loading weights...' });
 
-        var result = Module._bitnet_init(ptr, size, nLayers);
+        var result = Module._bitnet_init(ptr, size, nLayers, nThreads);
 
         /* Free the GGUF file buffer — weights are copied out */
         Module._free(ptr);
@@ -107,7 +107,7 @@ self.onmessage = function(e) {
     var msg = e.data;
     switch (msg.type) {
         case 'load':
-            loadModel(msg.buffer, msg.n_layers || -1);
+            loadModel(msg.buffer, msg.n_layers || -1, msg.n_threads || 0);
             break;
         case 'generate':
             runGenerate(

@@ -1,6 +1,7 @@
 #include <emscripten.h>
 #include "inference/gguf.h"
 #include "inference/model.h"
+#include "inference/thread_pool.h"
 #include "inference/weight_loader.h"
 #include "inference/tokenizer.h"
 #include "inference/generate.h"
@@ -23,6 +24,7 @@
 /* Global state — single model instance per worker */
 static model_t g_model;
 static tokenizer_t g_tok;
+static thread_pool_t g_pool;
 static int g_initialized = 0;
 
 /* Token callback: stream each token to main thread via postMessage */
@@ -44,6 +46,7 @@ static void wasm_token_callback(const char *piece, int32_t token_id,
  * gguf_data: pointer to GGUF file bytes (allocated by JS via _malloc)
  * size:      byte length of GGUF data
  * n_layers:  number of layers to load (-1 or 0 = all)
+ * n_threads: number of worker threads for parallel GEMV (0 = single-threaded)
  *
  * Returns: 0 on success, negative error code on failure
  *   -1: GGUF parse failed
@@ -55,7 +58,8 @@ static void wasm_token_callback(const char *piece, int32_t token_id,
  * copied out during loading.
  */
 EMSCRIPTEN_KEEPALIVE
-int bitnet_init(const uint8_t *gguf_data, size_t size, int32_t n_layers) {
+int bitnet_init(const uint8_t *gguf_data, size_t size, int32_t n_layers,
+                int32_t n_threads) {
     if (g_initialized) {
         fprintf(stderr, "bitnet_init: already initialized, call bitnet_free first\n");
         return -5;
@@ -111,6 +115,18 @@ int bitnet_init(const uint8_t *gguf_data, size_t size, int32_t n_layers) {
     /* 5. Free GGUF metadata (weights are copied out) */
     gguf_free(&gguf);
 
+    /* 6. Initialize thread pool for parallel GEMV/matmul */
+    if (n_threads > 0) {
+        if (thread_pool_init(&g_pool, n_threads) == 0) {
+            g_model.pool = &g_pool;
+        } else {
+            fprintf(stderr, "bitnet_init: thread pool init failed, using single-threaded\n");
+            g_model.pool = NULL;
+        }
+    } else {
+        g_model.pool = NULL;
+    }
+
     g_initialized = 1;
     fprintf(stderr, "Model loaded successfully.\n");
     return 0;
@@ -149,6 +165,12 @@ int bitnet_generate(const char *prompt, int32_t max_tokens,
 EMSCRIPTEN_KEEPALIVE
 void bitnet_free(void) {
     if (!g_initialized) return;
+
+    /* Destroy thread pool first (workers reference model data) */
+    if (g_model.pool) {
+        thread_pool_destroy(&g_pool);
+        g_model.pool = NULL;
+    }
 
     /* Free TL1 weight index allocations */
     for (int32_t l = 0; l < g_model.config.n_layers; l++) {

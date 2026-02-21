@@ -1,4 +1,5 @@
 #include "model.h"
+#include "thread_pool.h"
 #include "../kernels/gemv.h"
 #include "../kernels/tl1.h"
 #include <stdlib.h>
@@ -161,13 +162,11 @@ void softmax(float *x, int32_t size) {
     }
 }
 
-void matmul_f32(float *out, const float *x, const float *W,
-                int32_t M, int32_t K) {
-    /* out[i] = sum_j(W[i*K + j] * x[j]) */
+void matmul_f32_range(float *out, const float *x, const float *W,
+                      int32_t K, int32_t row_start, int32_t row_end) {
+    /* out[i] = sum_j(W[i*K + j] * x[j]) for rows [row_start, row_end) */
 #ifdef __wasm_simd128__
-    /* SIMD: 8-wide f32 accumulation (2 × f32x4) → ~3-4x speedup.
-     * Critical for logits: 128256 rows × 2560 cols = 328M FMAs. */
-    for (int32_t i = 0; i < M; i++) {
+    for (int32_t i = row_start; i < row_end; i++) {
         const float *row = &W[i * K];
         v128_t sum0 = wasm_f32x4_const(0, 0, 0, 0);
         v128_t sum1 = wasm_f32x4_const(0, 0, 0, 0);
@@ -179,20 +178,18 @@ void matmul_f32(float *out, const float *x, const float *W,
                 wasm_v128_load(&row[j + 4]), wasm_v128_load(&x[j + 4])));
         }
         sum0 = wasm_f32x4_add(sum0, sum1);
-        /* Horizontal sum of 4 f32 lanes */
         v128_t hi = wasm_i64x2_shuffle(sum0, sum0, 1, 0);
         sum0 = wasm_f32x4_add(sum0, hi);
         v128_t hi2 = wasm_i32x4_shuffle(sum0, sum0, 1, 0, 3, 2);
         sum0 = wasm_f32x4_add(sum0, hi2);
         float sum = wasm_f32x4_extract_lane(sum0, 0);
-        /* Scalar tail */
         for (; j < K; j++) {
             sum += row[j] * x[j];
         }
         out[i] = sum;
     }
 #else
-    for (int32_t i = 0; i < M; i++) {
+    for (int32_t i = row_start; i < row_end; i++) {
         float sum = 0.0f;
         const float *row = &W[i * K];
         for (int32_t j = 0; j < K; j++) {
@@ -201,6 +198,11 @@ void matmul_f32(float *out, const float *x, const float *W,
         out[i] = sum;
     }
 #endif
+}
+
+void matmul_f32(float *out, const float *x, const float *W,
+                int32_t M, int32_t K) {
+    matmul_f32_range(out, x, W, K, 0, M);
 }
 
 void rope_apply(float *q, float *k, int32_t n_heads, int32_t n_kv_heads,
@@ -282,12 +284,18 @@ void bitlinear_run(float *out, const tl1_weight_t *W, model_t *model) {
      * Phase 2: execute GEMV using pre-built LUT from bitlinear_prepare.
      * Zero allocation. Can be called multiple times with different weight
      * matrices that share the same input vector.
+     * Uses thread pool for parallel row processing when available.
      */
     gemv_scratch_t *s = &model->scratch;
     float scale = W->scale * s->act_scale;
 
-    tl1_gemv_simd_fast(W, s->lut_buf, s->lut_lo_buf, s->lut_hi_buf,
-                        scale, out);
+    if (model->pool && model->pool->n_threads > 0) {
+        thread_pool_gemv(model->pool, W, s->lut_buf, s->lut_lo_buf,
+                          s->lut_hi_buf, scale, out);
+    } else {
+        tl1_gemv_simd_fast(W, s->lut_buf, s->lut_lo_buf, s->lut_hi_buf,
+                            scale, out);
+    }
 }
 
 /* --- Forward pass --- */
@@ -417,7 +425,12 @@ float *forward(model_t *model, int32_t token, int32_t pos) {
     rms_norm(x, x, model->output_norm, dim, c->rms_norm_eps);
 
     /* Output logits: x @ embedding^T (tied weights) */
-    matmul_f32(model->logits, x, model->token_embedding, c->vocab_size, dim);
+    if (model->pool && model->pool->n_threads > 0) {
+        thread_pool_matmul(model->pool, model->logits, x,
+                            model->token_embedding, c->vocab_size, dim);
+    } else {
+        matmul_f32(model->logits, x, model->token_embedding, c->vocab_size, dim);
+    }
 
     return model->logits;
 }

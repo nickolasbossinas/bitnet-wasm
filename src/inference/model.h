@@ -44,6 +44,9 @@ typedef struct {
     int32_t  max_K;        /* allocation size (max of hidden, intermediate) */
 } gemv_scratch_t;
 
+/* Forward declaration for thread pool */
+struct thread_pool_s;
+
 /* Per-layer weights */
 typedef struct {
     /* Ternary weights (TL1 packed for SIMD) */
@@ -91,6 +94,9 @@ typedef struct {
 
     /* GEMV scratch (eliminates per-call malloc in bitlinear) */
     gemv_scratch_t scratch;
+
+    /* Thread pool for parallel GEMV/matmul (NULL = single-threaded) */
+    struct thread_pool_s *pool;
 } model_t;
 
 /*
@@ -133,6 +139,13 @@ void softmax(float *x, int32_t size);
  */
 void matmul_f32(float *out, const float *x, const float *W,
                 int32_t M, int32_t K);
+
+/*
+ * Row-range variant: compute rows [row_start, row_end) only.
+ * Used by thread pool for parallel matmul.
+ */
+void matmul_f32_range(float *out, const float *x, const float *W,
+                      int32_t K, int32_t row_start, int32_t row_end);
 
 /*
  * BitLinear: quantize activations -> TL1 GEMV -> scale output.

@@ -19,6 +19,7 @@ set(INFERENCE_SOURCES
     src/inference/weight_loader.c
     src/inference/tokenizer.c
     src/inference/generate.c
+    src/inference/thread_pool.c
 )
 
 # Benchmark
@@ -37,8 +38,8 @@ if(EMSCRIPTEN)
     # =========================================
     message(STATUS "Building for WebAssembly with SIMD")
 
-    # Enable WASM SIMD128
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -msimd128")
+    # Enable WASM SIMD128 and pthreads (SharedArrayBuffer-backed Web Workers)
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -msimd128 -pthread")
 
     # Optimization
     set(CMAKE_C_FLAGS_RELEASE "-O3 -flto")
@@ -66,6 +67,10 @@ if(EMSCRIPTEN)
 
         # Environment
         "-sENVIRONMENT=web,worker"
+
+        # Pthreads (shared compile flags require link flags)
+        -pthread
+        -sPTHREAD_POOL_SIZE=1
     )
 
     # Copy HTML to build dir
@@ -102,8 +107,12 @@ if(EMSCRIPTEN)
         -sMODULARIZE=1
         -sEXPORT_NAME='BitNetInference'
 
-        # Environment
+        # Environment (worker = main JS worker, worker subworkers for pthreads)
         "-sENVIRONMENT=web,worker"
+
+        # Pthreads: pre-create pool of Web Workers for instant thread start
+        -pthread
+        -sPTHREAD_POOL_SIZE=8
 
         # No main() function
         --no-entry
@@ -117,6 +126,9 @@ if(EMSCRIPTEN)
         COMMAND ${CMAKE_COMMAND} -E copy
             ${CMAKE_SOURCE_DIR}/web/inference.html
             ${CMAKE_BINARY_DIR}/inference.html
+        COMMAND ${CMAKE_COMMAND} -E copy
+            ${CMAKE_SOURCE_DIR}/web/serve.py
+            ${CMAKE_BINARY_DIR}/serve.py
         COMMENT "Copying inference web files to build directory"
     )
 

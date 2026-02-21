@@ -327,10 +327,11 @@ void tl1_presplit_lut(const int16_t *lut, uint8_t *lut_lo, uint8_t *lut_hi,
 
 /* --- Fast SIMD GEMV (no internal allocation) --- */
 
-void tl1_gemv_simd_fast(const tl1_weight_t *W,
-                         const int16_t *lut,
-                         const uint8_t *lut_lo, const uint8_t *lut_hi,
-                         float scale, float *out) {
+void tl1_gemv_simd_fast_range(const tl1_weight_t *W,
+                               const int16_t *lut,
+                               const uint8_t *lut_lo, const uint8_t *lut_hi,
+                               float scale, float *out,
+                               int32_t row_start, int32_t row_end) {
     int32_t M = W->M;
     int32_t K = W->K;
     int32_t num_pairs = K / 2;
@@ -339,7 +340,9 @@ void tl1_gemv_simd_fast(const tl1_weight_t *W,
 
     const uint8_t *col = W->indices_col;
     int32_t i;
-    for (i = 0; i + 16 <= M; i += 16) {
+
+    /* SIMD: 16 rows at a time */
+    for (i = row_start; i + 16 <= row_end; i += 16) {
         v128_t acc0 = simd_zero();
         v128_t acc1 = simd_zero();
         v128_t acc2 = simd_zero();
@@ -432,8 +435,8 @@ void tl1_gemv_simd_fast(const tl1_weight_t *W,
             wasm_f32x4_mul(wasm_f32x4_convert_i32x4(acc3), sv));
     }
 
-    /* Handle remaining rows (< 16) with scalar fallback */
-    for (; i < M; i++) {
+    /* Handle remaining rows with scalar fallback */
+    for (; i < row_end; i++) {
         int32_t acc = 0;
         const uint8_t *row_indices = &W->indices[i * bytes_per_row];
 
@@ -448,6 +451,13 @@ void tl1_gemv_simd_fast(const tl1_weight_t *W,
 
         out[i] = (float)acc * scale;
     }
+}
+
+void tl1_gemv_simd_fast(const tl1_weight_t *W,
+                         const int16_t *lut,
+                         const uint8_t *lut_lo, const uint8_t *lut_hi,
+                         float scale, float *out) {
+    tl1_gemv_simd_fast_range(W, lut, lut_lo, lut_hi, scale, out, 0, W->M);
 }
 
 #else
@@ -466,19 +476,19 @@ void tl1_gemv_simd(const tl1_weight_t *W,
     tl1_gemv_scalar(W, lut, x, y);
 }
 
-void tl1_gemv_simd_fast(const tl1_weight_t *W,
-                         const int16_t *lut,
-                         const uint8_t *lut_lo, const uint8_t *lut_hi,
-                         float scale, float *out) {
+void tl1_gemv_simd_fast_range(const tl1_weight_t *W,
+                               const int16_t *lut,
+                               const uint8_t *lut_lo, const uint8_t *lut_hi,
+                               float scale, float *out,
+                               int32_t row_start, int32_t row_end) {
     /* Scalar fallback uses original int16 LUT */
     (void)lut_lo; (void)lut_hi;
-    int32_t M = W->M;
     int32_t K = W->K;
     int32_t num_pairs = K / 2;
     int32_t bytes_per_row = (num_pairs + 1) / 2;
     int32_t full_bytes = num_pairs / 2;
 
-    for (int32_t i = 0; i < M; i++) {
+    for (int32_t i = row_start; i < row_end; i++) {
         int32_t acc = 0;
         const uint8_t *row_indices = &W->indices[i * bytes_per_row];
 
@@ -493,6 +503,13 @@ void tl1_gemv_simd_fast(const tl1_weight_t *W,
 
         out[i] = (float)acc * scale;
     }
+}
+
+void tl1_gemv_simd_fast(const tl1_weight_t *W,
+                         const int16_t *lut,
+                         const uint8_t *lut_lo, const uint8_t *lut_hi,
+                         float scale, float *out) {
+    tl1_gemv_simd_fast_range(W, lut, lut_lo, lut_hi, scale, out, 0, W->M);
 }
 
 #endif /* __wasm_simd128__ */

@@ -122,4 +122,15 @@ void tl1_gemv_simd_fast(const tl1_weight_t *W,
                          const uint8_t *lut_lo, const uint8_t *lut_hi,
                          float scale, float *out);
 
+/*
+ * Row-range variant: process only rows [row_start, row_end).
+ * Used by thread pool to parallelize GEMV across worker threads.
+ * Each thread writes to out[row_start..row_end-1].
+ */
+void tl1_gemv_simd_fast_range(const tl1_weight_t *W,
+                               const int16_t *lut,
+                               const uint8_t *lut_lo, const uint8_t *lut_hi,
+                               float scale, float *out,
+                               int32_t row_start, int32_t row_end);
+
 #endif /* BITNET_TL1_H */

@@ -196,6 +196,10 @@
                 <label>Layers (-1 = all)</label>
                 <input type="number" id="layers-input" value="-1" min="-1" max="30">
             </div>
+            <div class="input-group">
+                <label>Threads (0 = single)</label>
+                <input type="number" id="threads-input" value="3" min="0" max="7">
+            </div>
             <button id="load-btn" disabled>Load Model</button>
         </div>
     </div>
@@ -257,6 +261,7 @@
         const statsEl = document.getElementById('stats');
         const fileInput = document.getElementById('file-input');
         const layersInput = document.getElementById('layers-input');
+        const threadsInput = document.getElementById('threads-input');
         const loadBtn = document.getElementById('load-btn');
         const generateBtn = document.getElementById('generate-btn');
         const promptEl = document.getElementById('prompt');
@@ -276,8 +281,15 @@
                     0x0b
                 ]);
                 await WebAssembly.compile(bytes);
+                var sabOk = typeof SharedArrayBuffer !== 'undefined';
                 el.className = 'simd-check simd-yes';
-                el.textContent = 'WASM SIMD supported';
+                el.textContent = 'WASM SIMD supported' +
+                    (sabOk ? ' | SharedArrayBuffer enabled (threading OK)' :
+                             ' | SharedArrayBuffer disabled (need COOP/COEP headers, use serve.py)');
+                if (!sabOk) {
+                    threadsInput.value = '0';
+                    threadsInput.disabled = true;
+                }
                 return true;
             } catch (e) {
                 el.className = 'simd-check simd-no';
@@ -367,9 +379,10 @@
             reader.onload = function(e) {
                 var buffer = e.target.result;
                 var nLayers = parseInt(layersInput.value) || -1;
+                var nThreads = parseInt(threadsInput.value) || 0;
                 /* Transfer the ArrayBuffer to worker (zero-copy) */
                 worker.postMessage(
-                    { type: 'load', buffer: buffer, n_layers: nLayers },
+                    { type: 'load', buffer: buffer, n_layers: nLayers, n_threads: nThreads },
                     [buffer]
                 );
             };
