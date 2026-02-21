@@ -124,7 +124,8 @@ int bitnet_init(const uint8_t *gguf_data, size_t size, int32_t n_layers) {
  */
 EMSCRIPTEN_KEEPALIVE
 int bitnet_generate(const char *prompt, int32_t max_tokens,
-                     float temperature, float top_p, uint32_t seed) {
+                     float temperature, float top_p, uint32_t seed,
+                     float repetition_penalty) {
     if (!g_initialized) {
         fprintf(stderr, "bitnet_generate: model not initialized\n");
         return -1;
@@ -135,6 +136,7 @@ int bitnet_generate(const char *prompt, int32_t max_tokens,
         .top_p = top_p,
         .max_tokens = max_tokens,
         .seed = seed,
+        .repetition_penalty = repetition_penalty,
     };
 
     return generate(&g_model, &g_tok, prompt, &params,

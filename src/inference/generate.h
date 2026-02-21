@@ -13,10 +13,11 @@
  */
 
 typedef struct {
-    float    temperature;  /* 0 = greedy/argmax */
-    float    top_p;        /* nucleus sampling threshold */
-    int32_t  max_tokens;   /* max new tokens to generate */
-    uint32_t seed;         /* RNG seed for sampling */
+    float    temperature;        /* 0 = greedy/argmax */
+    float    top_p;              /* nucleus sampling threshold */
+    int32_t  max_tokens;         /* max new tokens to generate */
+    uint32_t seed;               /* RNG seed for sampling */
+    float    repetition_penalty; /* 1.0 = off, >1.0 penalizes repeats */
 } generate_params_t;
 
 /*

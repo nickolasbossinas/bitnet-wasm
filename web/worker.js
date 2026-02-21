@@ -6,7 +6,7 @@
  *
  * Inbound:
  *   {type: 'load', buffer: ArrayBuffer, n_layers: number}
- *   {type: 'generate', prompt, max_tokens, temperature, top_p, seed}
+ *   {type: 'generate', prompt, max_tokens, temperature, top_p, seed, repetition_penalty}
  *
  * Outbound:
  *   {type: 'ready'}
@@ -92,10 +92,10 @@ async function loadModel(buffer, nLayers) {
     }
 }
 
-function runGenerate(prompt, maxTokens, temperature, topP, seed) {
+function runGenerate(prompt, maxTokens, temperature, topP, seed, repPenalty) {
     try {
         var promptPtr = Module.stringToNewUTF8(prompt);
-        var n = Module._bitnet_generate(promptPtr, maxTokens, temperature, topP, seed);
+        var n = Module._bitnet_generate(promptPtr, maxTokens, temperature, topP, seed, repPenalty);
         Module._free(promptPtr);
         self.postMessage({ type: 'done', n_tokens: n });
     } catch (e) {
@@ -115,7 +115,8 @@ self.onmessage = function(e) {
                 msg.max_tokens || 64,
                 msg.temperature || 0.0,
                 msg.top_p || 0.9,
-                msg.seed || 42
+                msg.seed || 42,
+                msg.repetition_penalty || 1.1
             );
             break;
     }

@@ -1,6 +1,7 @@
 #include "generate.h"
 #include "sampler.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef _WIN32
@@ -64,7 +65,30 @@ int generate(model_t *model, tokenizer_t *tok, const char *prompt,
     double t_decode_start = get_time_ms();
     int32_t n_generated = 0;
 
+    /* Token history for repetition penalty and loop detection */
+    int32_t *history = (int32_t *)malloc((n_prompt + max_new) * sizeof(int32_t));
+    if (!history) {
+        fprintf(stderr, "generate: failed to allocate token history\n");
+        return -1;
+    }
+    memcpy(history, prompt_tokens, n_prompt * sizeof(int32_t));
+    int32_t history_len = n_prompt;
+
+    float rep_penalty = params->repetition_penalty;
+    int32_t consecutive_newlines = 0;
+
     for (int32_t i = 0; i < max_new; i++) {
+        /* Apply repetition penalty to logits for previously seen tokens */
+        if (rep_penalty != 1.0f) {
+            for (int32_t h = 0; h < history_len; h++) {
+                int32_t tid = history[h];
+                if (logits[tid] > 0.0f)
+                    logits[tid] /= rep_penalty;
+                else
+                    logits[tid] *= rep_penalty;
+            }
+        }
+
         /* Sample next token from logits */
         int32_t next_token;
         if (params->temperature == 0.0f) {
@@ -81,14 +105,39 @@ int generate(model_t *model, tokenizer_t *tok, const char *prompt,
         }
 
         n_generated++;
+        history[history_len++] = next_token;
+
+        /* Stop on repeated 8-gram (model is looping) */
+        if (history_len >= 16) {
+            int32_t ngram = 8;
+            int32_t *recent = &history[history_len - ngram];
+            int32_t *prior  = &history[history_len - 2 * ngram];
+            if (memcmp(recent, prior, ngram * sizeof(int32_t)) == 0) {
+                fprintf(stderr, "[generate] stopped: repeated %d-gram detected\n", ngram);
+                break;
+            }
+        }
 
         /* Decode and emit token (GPT-2 byte decode → raw bytes) */
-        if (callback) {
+        {
             char piece_buf[256];
             int32_t len = tokenizer_decode(tok, &next_token, 1,
                                             piece_buf, sizeof(piece_buf));
             if (len > 0) {
-                callback(piece_buf, next_token, user_data);
+                if (callback) {
+                    callback(piece_buf, next_token, user_data);
+                }
+
+                /* Track consecutive newlines for \n\n stop */
+                for (int32_t c = 0; c < len; c++) {
+                    if (piece_buf[c] == '\n')
+                        consecutive_newlines++;
+                    else
+                        consecutive_newlines = 0;
+                }
+                if (consecutive_newlines >= 2) {
+                    break;
+                }
             }
         }
 
@@ -97,10 +146,12 @@ int generate(model_t *model, tokenizer_t *tok, const char *prompt,
         logits = forward(model, next_token, pos);
         if (!logits) {
             fprintf(stderr, "generate: forward failed at decode pos %d\n", pos);
+            free(history);
             return -1;
         }
     }
     double t_decode_end = get_time_ms();
+    free(history);
 
     /* Print timing stats */
     double prefill_ms = t_prefill_end - t_prefill_start;

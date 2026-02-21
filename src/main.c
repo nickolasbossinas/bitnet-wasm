@@ -15,6 +15,7 @@
  *   -n 32             Max tokens to generate (default: 32)
  *   -t 0.0            Temperature (default: 0.0 = greedy)
  *   --top-p 0.9       Top-p sampling (default: 0.9)
+ *   -r 1.1            Repetition penalty (default: 1.1, 1.0 = off)
  *   --layers N        Load only N layers (default: all)
  *   --seed N          RNG seed (default: 42)
  */
@@ -26,6 +27,7 @@ static void print_usage(const char *prog) {
         "  -n 32             Max tokens to generate (default: 32)\n"
         "  -t 0.0            Temperature (default: 0.0 = greedy)\n"
         "  --top-p 0.9       Top-p sampling (default: 0.9)\n"
+        "  -r 1.1            Repetition penalty (default: 1.1, 1.0 = off)\n"
         "  --layers N        Load only N layers (default: all)\n"
         "  --seed N          RNG seed (default: 42)\n",
         prog);
@@ -51,6 +53,7 @@ int main(int argc, char **argv) {
     int32_t max_tokens = 32;
     float temperature = 0.0f;
     float top_p = 0.9f;
+    float rep_penalty = 1.1f;
     int32_t n_layers = -1;  /* all */
     uint32_t seed = 42;
 
@@ -64,6 +67,8 @@ int main(int argc, char **argv) {
             temperature = (float)atof(argv[++i]);
         } else if (strcmp(argv[i], "--top-p") == 0 && i + 1 < argc) {
             top_p = (float)atof(argv[++i]);
+        } else if (strcmp(argv[i], "-r") == 0 && i + 1 < argc) {
+            rep_penalty = (float)atof(argv[++i]);
         } else if (strcmp(argv[i], "--layers") == 0 && i + 1 < argc) {
             n_layers = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
@@ -160,11 +165,12 @@ int main(int argc, char **argv) {
         .top_p = top_p,
         .max_tokens = max_tokens,
         .seed = seed,
+        .repetition_penalty = rep_penalty,
     };
 
     fprintf(stderr, "Prompt: \"%s\"\n", prompt);
-    fprintf(stderr, "Params: temp=%.2f, top_p=%.2f, max_tokens=%d, seed=%u\n\n",
-            temperature, top_p, max_tokens, seed);
+    fprintf(stderr, "Params: temp=%.2f, top_p=%.2f, rep_penalty=%.2f, max_tokens=%d, seed=%u\n\n",
+            temperature, top_p, rep_penalty, max_tokens, seed);
 
     int n = generate(&model, &tok, prompt, &params, stream_token, NULL);
     printf("\n");

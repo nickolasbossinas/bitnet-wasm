@@ -217,6 +217,10 @@
                 <input type="number" id="top-p" value="0.9" min="0" max="1" step="0.05">
             </div>
             <div class="input-group">
+                <label>Repetition Penalty</label>
+                <input type="number" id="rep-penalty" value="1.1" min="1.0" max="2.0" step="0.05">
+            </div>
+            <div class="input-group">
                 <label>Seed</label>
                 <input type="number" id="seed" value="42" min="0">
             </div>
@@ -400,6 +404,7 @@
             var maxTokens = parseInt(document.getElementById('max-tokens').value) || 64;
             var temperature = parseFloat(document.getElementById('temperature').value) || 0.0;
             var topP = parseFloat(document.getElementById('top-p').value) || 0.9;
+            var repPenalty = parseFloat(document.getElementById('rep-penalty').value) || 1.1;
             var seed = parseInt(document.getElementById('seed').value) || 42;
 
             setStatus('Generating...', true);
@@ -410,7 +415,8 @@
                 max_tokens: maxTokens,
                 temperature: temperature,
                 top_p: topP,
-                seed: seed
+                seed: seed,
+                repetition_penalty: repPenalty
             });
         }
 

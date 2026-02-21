@@ -685,6 +685,7 @@ static int test_generate(void) {
         .top_p = 0.9f,
         .max_tokens = 5,
         .seed = 42,
+        .repetition_penalty = 1.0f,
     };
 
     gen_token_count = 0;
