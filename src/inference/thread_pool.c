@@ -27,6 +27,14 @@ static void execute_work(work_item_t *w) {
                                   w->scale, w->out,
                                   w->row_start, w->row_end);
         break;
+    case WORK_GEMV_TL1_BATCH:
+        for (int32_t op = 0; op < w->n_batch_ops; op++) {
+            int32_t rs, re;
+            split_rows(w->batch_ops[op].W->M, w->batch_total, w->batch_idx, &rs, &re);
+            tl1_gemv_simd_fast_range(w->batch_ops[op].W, w->lut, w->lut_lo, w->lut_hi,
+                                      w->batch_ops[op].scale, w->batch_ops[op].out, rs, re);
+        }
+        break;
     case WORK_MATMUL_F32:
         matmul_f32_range(w->out, w->x, w->W_f32, w->K,
                           w->row_start, w->row_end);
@@ -34,6 +42,10 @@ static void execute_work(work_item_t *w) {
     case WORK_MATMUL_F16F32:
         matmul_f16f32_range(w->out, w->x, w->W_f16, w->K,
                              w->row_start, w->row_end);
+        break;
+    case WORK_MATMUL_I8:
+        matmul_i8_range(w->out, w->x_i8, w->x_scale, w->W_i8, w->row_scales,
+                         w->K, w->row_start, w->row_end);
         break;
     default:
         break;
@@ -216,6 +228,66 @@ void thread_pool_matmul_f16(thread_pool_t *pool,
     pthread_barrier_wait(&pool->barrier_done);
 }
 
+void thread_pool_gemv_batch(thread_pool_t *pool,
+                             const gemv_batch_op_t *ops, int32_t n_ops,
+                             const int16_t *lut,
+                             const uint8_t *lut_lo, const uint8_t *lut_hi) {
+    int32_t n = pool->n_threads;
+    int32_t total = n + 1;
+
+    for (int32_t i = 0; i < n; i++) {
+        pool->work[i].type = WORK_GEMV_TL1_BATCH;
+        pool->work[i].lut = lut;
+        pool->work[i].lut_lo = lut_lo;
+        pool->work[i].lut_hi = lut_hi;
+        pool->work[i].n_batch_ops = n_ops;
+        pool->work[i].batch_idx = i;
+        pool->work[i].batch_total = total;
+        for (int32_t op = 0; op < n_ops; op++) {
+            pool->work[i].batch_ops[op] = ops[op];
+        }
+    }
+
+    /* Wake workers */
+    pthread_barrier_wait(&pool->barrier_start);
+
+    /* Main thread computes its slices */
+    for (int32_t op = 0; op < n_ops; op++) {
+        int32_t rs, re;
+        split_rows(ops[op].W->M, total, n, &rs, &re);
+        tl1_gemv_simd_fast_range(ops[op].W, lut, lut_lo, lut_hi,
+                                  ops[op].scale, ops[op].out, rs, re);
+    }
+
+    pthread_barrier_wait(&pool->barrier_done);
+}
+
+void thread_pool_matmul_i8(thread_pool_t *pool,
+                            float *out, const int8_t *x_quant, float x_scale,
+                            const int8_t *W, const float *row_scales,
+                            int32_t M, int32_t K) {
+    int32_t n = pool->n_threads;
+    int32_t total = n + 1;
+
+    for (int32_t i = 0; i < n; i++) {
+        int32_t rs, re;
+        split_rows(M, total, i, &rs, &re);
+        pool->work[i] = (work_item_t){
+            .type = WORK_MATMUL_I8,
+            .row_start = rs, .row_end = re,
+            .W_i8 = W, .x_i8 = x_quant, .row_scales = row_scales,
+            .x_scale = x_scale, .K = K, .out = out
+        };
+    }
+
+    int32_t main_start, main_end;
+    split_rows(M, total, n, &main_start, &main_end);
+
+    pthread_barrier_wait(&pool->barrier_start);
+    matmul_i8_range(out, x_quant, x_scale, W, row_scales, K, main_start, main_end);
+    pthread_barrier_wait(&pool->barrier_done);
+}
+
 #else /* !BITNET_THREADED */
 
 /* Non-threaded stubs — call range functions directly (single-threaded) */
@@ -252,6 +324,25 @@ void thread_pool_matmul_f16(thread_pool_t *pool,
                              int32_t M, int32_t K) {
     (void)pool;
     matmul_f16f32_range(out, x, W, K, 0, M);
+}
+
+void thread_pool_gemv_batch(thread_pool_t *pool,
+                             const gemv_batch_op_t *ops, int32_t n_ops,
+                             const int16_t *lut,
+                             const uint8_t *lut_lo, const uint8_t *lut_hi) {
+    (void)pool;
+    for (int32_t op = 0; op < n_ops; op++) {
+        tl1_gemv_simd_fast_range(ops[op].W, lut, lut_lo, lut_hi,
+                                  ops[op].scale, ops[op].out, 0, ops[op].W->M);
+    }
+}
+
+void thread_pool_matmul_i8(thread_pool_t *pool,
+                            float *out, const int8_t *x_quant, float x_scale,
+                            const int8_t *W, const float *row_scales,
+                            int32_t M, int32_t K) {
+    (void)pool;
+    matmul_i8_range(out, x_quant, x_scale, W, row_scales, K, 0, M);
 }
 
 #endif /* BITNET_THREADED */

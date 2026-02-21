@@ -435,18 +435,17 @@ void tl1_gemv_simd_fast_range(const tl1_weight_t *W,
             wasm_f32x4_mul(wasm_f32x4_convert_i32x4(acc3), sv));
     }
 
-    /* Handle remaining rows with scalar fallback */
+    /* Handle remaining rows with scalar fallback (reads column-major indices) */
     for (; i < row_end; i++) {
         int32_t acc = 0;
-        const uint8_t *row_indices = &W->indices[i * bytes_per_row];
 
         for (int32_t b = 0; b < full_bytes; b++) {
-            uint8_t packed = row_indices[b];
+            uint8_t packed = col[b * M + i];
             acc += (int32_t)lut[b * 32 + (packed & 0x0F)]
                  + (int32_t)lut[b * 32 + 16 + (packed >> 4)];
         }
         if (num_pairs & 1) {
-            acc += (int32_t)lut[full_bytes * 32 + (row_indices[full_bytes] & 0x0F)];
+            acc += (int32_t)lut[full_bytes * 32 + (col[full_bytes * M + i] & 0x0F)];
         }
 
         out[i] = (float)acc * scale;
@@ -481,24 +480,24 @@ void tl1_gemv_simd_fast_range(const tl1_weight_t *W,
                                const uint8_t *lut_lo, const uint8_t *lut_hi,
                                float scale, float *out,
                                int32_t row_start, int32_t row_end) {
-    /* Scalar fallback uses original int16 LUT */
+    /* Scalar fallback uses column-major indices and original int16 LUT */
     (void)lut_lo; (void)lut_hi;
+    int32_t M = W->M;
     int32_t K = W->K;
     int32_t num_pairs = K / 2;
-    int32_t bytes_per_row = (num_pairs + 1) / 2;
     int32_t full_bytes = num_pairs / 2;
+    const uint8_t *col = W->indices_col;
 
     for (int32_t i = row_start; i < row_end; i++) {
         int32_t acc = 0;
-        const uint8_t *row_indices = &W->indices[i * bytes_per_row];
 
         for (int32_t b = 0; b < full_bytes; b++) {
-            uint8_t packed = row_indices[b];
+            uint8_t packed = col[b * M + i];
             acc += (int32_t)lut[b * 32 + (packed & 0x0F)]
                  + (int32_t)lut[b * 32 + 16 + (packed >> 4)];
         }
         if (num_pairs & 1) {
-            acc += (int32_t)lut[full_bytes * 32 + (row_indices[full_bytes] & 0x0F)];
+            acc += (int32_t)lut[full_bytes * 32 + (col[full_bytes * M + i] & 0x0F)];
         }
 
         out[i] = (float)acc * scale;

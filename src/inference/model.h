@@ -69,16 +69,24 @@ typedef struct {
     model_config_t  config;
 
     /* Global weights */
-    uint16_t       *token_embedding;  /* [vocab_size * hidden_size] F16 */
+    uint16_t       *token_embedding;  /* [vocab_size * hidden_size] F16 (freed after INT8 quantization) */
     float          *output_norm;      /* [hidden_size] */
     /* output projection is tied to token_embedding */
+
+    /* INT8 quantized embedding (replaces F16 for logits matmul + embedding lookup) */
+    int8_t         *emb_quantized;    /* [vocab_size * hidden_size] */
+    float          *emb_row_scales;   /* [vocab_size] per-row scale factors */
+
+    /* Precomputed RoPE sin/cos tables (eliminates per-token trig calls) */
+    float          *rope_cos;         /* [max_seq_len * head_dim/2] */
+    float          *rope_sin;         /* [max_seq_len * head_dim/2] */
 
     /* Per-layer weights */
     layer_weights_t *layers;          /* [n_layers] */
 
-    /* KV cache: [n_layers][max_seq_len][n_kv_heads][head_dim] */
-    float          *key_cache;
-    float          *value_cache;
+    /* KV cache: [n_layers][max_seq_len][n_kv_heads][head_dim] (F16, halves memory) */
+    uint16_t       *key_cache;
+    uint16_t       *value_cache;
 
     /* Scratch buffers (pre-allocated for forward pass) */
     float *x;          /* [hidden_size] current hidden state */
@@ -161,6 +169,19 @@ void matmul_f16f32(float *out, const float *x, const uint16_t *W,
                     int32_t M, int32_t K);
 void matmul_f16f32_range(float *out, const float *x, const uint16_t *W,
                           int32_t K, int32_t row_start, int32_t row_end);
+
+/*
+ * INT8 x INT8 matrix-vector multiply: out[M] = W_i8[M,K] · x_i8[K]
+ * Both W and x are symmetric int8 quantized. Per-row scales for W.
+ * out[i] = dot(W[i], x) * row_scales[i] * x_scale
+ * Used for logits matmul (2x less bandwidth than F16).
+ */
+void matmul_i8(float *out, const int8_t *x_quant, float x_scale,
+               const int8_t *W, const float *row_scales,
+               int32_t M, int32_t K);
+void matmul_i8_range(float *out, const int8_t *x_quant, float x_scale,
+                     const int8_t *W, const float *row_scales,
+                     int32_t K, int32_t row_start, int32_t row_end);
 
 /*
  * BitLinear: quantize activations -> TL1 GEMV -> scale output.

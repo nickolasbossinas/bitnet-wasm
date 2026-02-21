@@ -26,11 +26,21 @@
 
 #define BITNET_MAX_THREADS 8
 
+#define GEMV_BATCH_MAX 3
+
+typedef struct {
+    const tl1_weight_t *W;
+    float *out;
+    float scale;  /* W->scale * act_scale for this operation */
+} gemv_batch_op_t;
+
 typedef enum {
     WORK_NONE = 0,
     WORK_GEMV_TL1,
+    WORK_GEMV_TL1_BATCH,
     WORK_MATMUL_F32,
     WORK_MATMUL_F16F32,
+    WORK_MATMUL_I8,
     WORK_EXIT
 } work_type_t;
 
@@ -51,6 +61,18 @@ typedef struct {
     const float *W_f32;
     const uint16_t *W_f16;  /* F16 weights for logits matmul */
     int32_t K;
+
+    /* Batch GEMV params (multiple GEMVs in one dispatch) */
+    gemv_batch_op_t batch_ops[GEMV_BATCH_MAX];
+    int32_t n_batch_ops;
+    int32_t batch_idx;     /* this worker's index */
+    int32_t batch_total;   /* total workers (n_threads + 1) */
+
+    /* INT8 matmul params */
+    const int8_t *W_i8;
+    const int8_t *x_i8;
+    const float *row_scales;
+    float x_scale;
 
     /* Output (shared by both GEMV and matmul) */
     float *out;
@@ -113,5 +135,26 @@ void thread_pool_matmul(thread_pool_t *pool,
 void thread_pool_matmul_f16(thread_pool_t *pool,
                              float *out, const float *x, const uint16_t *W,
                              int32_t M, int32_t K);
+
+/*
+ * Dispatch batched TL1 GEMV: multiple GEMVs in a single barrier pair.
+ * All ops share the same LUT but have per-op scales.
+ * Each worker computes its row range for each op.
+ * Reduces Q+K+V from 3 dispatches to 1, gate+up from 2 to 1.
+ */
+void thread_pool_gemv_batch(thread_pool_t *pool,
+                             const gemv_batch_op_t *ops, int32_t n_ops,
+                             const int16_t *lut,
+                             const uint8_t *lut_lo, const uint8_t *lut_hi);
+
+/*
+ * Dispatch parallel INT8 matmul: split M output rows across threads.
+ * Both W and x are int8. Per-row scales for W, single scale for x.
+ * Used for logits with INT8 quantized embedding (2x less BW than F16).
+ */
+void thread_pool_matmul_i8(thread_pool_t *pool,
+                            float *out, const int8_t *x_quant, float x_scale,
+                            const int8_t *W, const float *row_scales,
+                            int32_t M, int32_t K);
 
 #endif /* BITNET_THREAD_POOL_H */

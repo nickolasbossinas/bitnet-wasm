@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 
 /* --- F16 -> F32 conversion --- */
 
@@ -191,6 +192,53 @@ static uint16_t *load_f16_raw(const gguf_context_t *gguf,
     return dst;
 }
 
+/* --- Helper: quantize F16 embedding to INT8 with per-row scales --- */
+
+static int quantize_embedding_int8(const uint16_t *f16_data,
+                                    int8_t **out_quant, float **out_scales,
+                                    int32_t vocab_size, int32_t dim) {
+    int64_t total = (int64_t)vocab_size * dim;
+    int8_t *quant = (int8_t *)malloc(total);
+    float *scales = (float *)malloc(vocab_size * sizeof(float));
+    if (!quant || !scales) {
+        free(quant);
+        free(scales);
+        return -1;
+    }
+
+    for (int32_t r = 0; r < vocab_size; r++) {
+        const uint16_t *row = &f16_data[(int64_t)r * dim];
+        int8_t *out_row = &quant[(int64_t)r * dim];
+
+        /* Find max absolute value in row */
+        float max_abs = 0.0f;
+        for (int32_t j = 0; j < dim; j++) {
+            float v = f16_to_f32(row[j]);
+            float av = v > 0 ? v : -v;
+            if (av > max_abs) max_abs = av;
+        }
+
+        scales[r] = max_abs / 127.0f;
+
+        if (max_abs == 0.0f) {
+            memset(out_row, 0, dim);
+        } else {
+            float inv_scale = 127.0f / max_abs;
+            for (int32_t j = 0; j < dim; j++) {
+                float v = f16_to_f32(row[j]);
+                int32_t q = (int32_t)roundf(v * inv_scale);
+                if (q > 127) q = 127;
+                if (q < -127) q = -127;
+                out_row[j] = (int8_t)q;
+            }
+        }
+    }
+
+    *out_quant = quant;
+    *out_scales = scales;
+    return 0;
+}
+
 /* --- Helper: load I2_S ternary tensor into TL1 format --- */
 
 static int load_tl1_weight(tl1_weight_t *w,
@@ -243,6 +291,11 @@ static int load_tl1_weight(tl1_weight_t *w,
     tl1_pack_weights(raw, w->indices, M, K);
     tl1_transpose_weights(w);
 
+    /* Free row-major indices — the SIMD hot path and scalar tail
+     * both use column-major indices_col now. Saves ~312 MB total. */
+    free(w->indices);
+    w->indices = NULL;
+
     free(raw);
     return 0;
 }
@@ -261,13 +314,29 @@ int model_load_weights(model_t *model, const gguf_context_t *gguf,
     fprintf(stderr, "weight_loader: loading %d/%d layers (dim=%d, inter=%d, kv_dim=%d)\n",
             n_layers, c->n_layers, dim, inter, kv_dim);
 
-    /* Load token embedding as raw F16 (halves memory, 2x faster logits matmul) */
+    /* Load token embedding as raw F16, then quantize to INT8 */
     int64_t emb_size = (int64_t)c->vocab_size * dim;
     model->token_embedding = load_f16_raw(gguf, file_data,
                                            "token_embd.weight", emb_size);
     if (!model->token_embedding) return -1;
     fprintf(stderr, "weight_loader: loaded token_embd.weight F16 (%.1f MB)\n",
             emb_size * 2.0f / (1024.0f * 1024.0f));
+
+    /* Quantize F16 embedding to INT8 with per-row scales.
+     * This halves logits matmul bandwidth (328 MB vs 655 MB) and enables
+     * fast int8×int8 SIMD dot products. Embedding lookup dequantizes 1 row. */
+    if (quantize_embedding_int8(model->token_embedding,
+                                 &model->emb_quantized, &model->emb_row_scales,
+                                 c->vocab_size, dim) != 0) {
+        fprintf(stderr, "weight_loader: failed to quantize embedding to INT8\n");
+        return -1;
+    }
+    /* Free F16 embedding — INT8 version replaces it for both lookup and logits */
+    free(model->token_embedding);
+    model->token_embedding = NULL;
+    fprintf(stderr, "weight_loader: quantized embedding to INT8 (%.1f MB, saved %.1f MB)\n",
+            emb_size * 1.0f / (1024.0f * 1024.0f),
+            emb_size * 1.0f / (1024.0f * 1024.0f));
 
     /* Load output norm (F32) */
     model->output_norm = load_f32_tensor(gguf, file_data,
