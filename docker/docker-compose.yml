@@ -1,0 +1,13 @@
+services:
+  build:
+    image: emscripten/emsdk
+    volumes:
+      - ../:/src
+    working_dir: /src/build
+    command: >
+      bash -c "
+        mkdir -p /src/build &&
+        cd /src/build &&
+        emcmake cmake .. -DCMAKE_BUILD_TYPE=Release &&
+        emmake make
+      "

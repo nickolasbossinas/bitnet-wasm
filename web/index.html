@@ -155,11 +155,11 @@
                 const bytes = new Uint8Array([
                     0x00, 0x61, 0x73, 0x6d, // magic
                     0x01, 0x00, 0x00, 0x00, // version
-                    0x01, 0x05, 0x01,       // type section
+                    0x01, 0x05, 0x01,       // type section (id=1, size=5, count=1)
                     0x60, 0x00, 0x01, 0x7b, // func type: () -> v128
-                    0x03, 0x02, 0x01, 0x00, // function section
-                    0x0a, 0x0a, 0x01,       // code section
-                    0x08, 0x00,             // func body
+                    0x03, 0x02, 0x01, 0x00, // function section (id=3, size=2, count=1)
+                    0x0a, 0x16, 0x01,       // code section (id=10, size=22, count=1)
+                    0x14, 0x00,             // func body (size=20, 0 locals)
                     0xfd, 0x0c,             // v128.const
                     0x00, 0x00, 0x00, 0x00,
                     0x00, 0x00, 0x00, 0x00,
@@ -167,7 +167,7 @@
                     0x00, 0x00, 0x00, 0x00,
                     0x0b                    // end
                 ]);
-                await WebAssembly.compile(bytes.buffer);
+                await WebAssembly.compile(bytes);
                 el.className = 'simd-check simd-yes';
                 el.textContent = 'WASM SIMD supported';
                 return true;
@@ -249,8 +249,7 @@
             }, 50);
         }
 
-        init();
     </script>
-    <script src="benchmark.js" async></script>
+    <script src="benchmark.js" onload="init()"></script>
 </body>
 </html>

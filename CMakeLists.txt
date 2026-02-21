@@ -49,7 +49,7 @@ if(EMSCRIPTEN)
         -sEXPORT_NAME='BitNetBench'
 
         # Environment
-        -sENVIRONMENT='web,worker'
+        "-sENVIRONMENT=web,worker"
     )
 
     # Copy HTML to build dir

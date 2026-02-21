@@ -51,12 +51,12 @@ void tl1_pack_weights(const int8_t *weights, uint8_t *out,
 
 /* --- LUT Construction --- */
 
-void tl1_build_lut(int8_t *lut, const int8_t *x, int32_t K) {
+void tl1_build_lut(int16_t *lut, const int8_t *x, int32_t K) {
     /*
-     * For each pair of activations (a0, a1), build a 16-byte LUT.
+     * For each pair of activations (a0, a1), build a 16-entry LUT.
      *
      * The 9 valid entries:
-     *   [0] (-1,-1) = -(a0 + a1)  clamp to int8
+     *   [0] (-1,-1) = -(a0 + a1)
      *   [1] (-1, 0) = -a0
      *   [2] (-1,+1) = -a0 + a1
      *   [3] ( 0,-1) = -a1
@@ -65,10 +65,9 @@ void tl1_build_lut(int8_t *lut, const int8_t *x, int32_t K) {
      *   [6] (+1,-1) = a0 - a1
      *   [7] (+1, 0) = a0
      *   [8] (+1,+1) = a0 + a1
-     *   [9..15]     = 0 (padding for 16-byte alignment)
+     *   [9..15]     = 0 (padding)
      *
-     * We store as int8 to fit in a single v128 register.
-     * For large activations, results are clamped to [-128, 127].
+     * Stored as int16 to avoid clamping (a0+a1 can be up to 254).
      * Accumulation uses int32 to avoid overflow.
      */
     int32_t num_pairs = K / 2;
@@ -76,32 +75,27 @@ void tl1_build_lut(int8_t *lut, const int8_t *x, int32_t K) {
     for (int32_t p = 0; p < num_pairs; p++) {
         int16_t a0 = (int16_t)x[p * 2];
         int16_t a1 = (int16_t)x[p * 2 + 1];
-        int8_t *entry = &lut[p * 16];
+        int16_t *entry = &lut[p * 16];
 
-        /* Compute and clamp to int8 range */
-        entry[0] = (int8_t)(-(a0 + a1) < -128 ? -128 :
-                            (-(a0 + a1) > 127 ? 127 : -(a0 + a1)));
-        entry[1] = (int8_t)(-a0);
-        entry[2] = (int8_t)(-a0 + a1 < -128 ? -128 :
-                            (-a0 + a1 > 127 ? 127 : -a0 + a1));
-        entry[3] = (int8_t)(-a1);
+        entry[0] = -(a0 + a1);
+        entry[1] = -a0;
+        entry[2] = -a0 + a1;
+        entry[3] = -a1;
         entry[4] = 0;
-        entry[5] = (int8_t)(a1);
-        entry[6] = (int8_t)(a0 - a1 < -128 ? -128 :
-                            (a0 - a1 > 127 ? 127 : a0 - a1));
-        entry[7] = (int8_t)(a0);
-        entry[8] = (int8_t)(a0 + a1 < -128 ? -128 :
-                            (a0 + a1 > 127 ? 127 : a0 + a1));
+        entry[5] = a1;
+        entry[6] = a0 - a1;
+        entry[7] = a0;
+        entry[8] = a0 + a1;
 
         /* Zero-pad entries 9-15 */
-        memset(&entry[9], 0, 7);
+        memset(&entry[9], 0, 7 * sizeof(int16_t));
     }
 }
 
 /* --- Scalar GEMV --- */
 
 void tl1_gemv_scalar(const tl1_weight_t *W,
-                     const int8_t *lut,
+                     const int16_t *lut,
                      const activation_t *x,
                      output_t *y) {
     int32_t M = W->M;
@@ -132,7 +126,7 @@ void tl1_gemv_scalar(const tl1_weight_t *W,
 #ifdef __wasm_simd128__
 
 void tl1_gemv_simd(const tl1_weight_t *W,
-                   const int8_t *lut,
+                   const int16_t *lut,
                    const activation_t *x,
                    output_t *y) {
     int32_t M = W->M;
@@ -210,7 +204,7 @@ void tl1_gemv_simd(const tl1_weight_t *W,
             for (int32_t k = 0; k < 16; k++) {
                 uint8_t idx_byte = idx_ptr[k / 2];
                 uint8_t idx = (k & 1) ? (idx_byte >> 4) : (idx_byte & 0x0F);
-                batch_acc += (int32_t)lut[(p + k) * 16 + idx];
+                batch_acc += (int32_t)lut[(p + k) * 16 + (int32_t)idx];
             }
 
             /* Accumulate batch into SIMD register lane 0 */
@@ -234,7 +228,7 @@ void tl1_gemv_simd(const tl1_weight_t *W,
 #else
 
 void tl1_gemv_simd(const tl1_weight_t *W,
-                   const int8_t *lut,
+                   const int16_t *lut,
                    const activation_t *x,
                    output_t *y) {
     tl1_gemv_scalar(W, lut, x, y);

@@ -81,7 +81,7 @@ double gemv_run(kernel_type_t kernel,
         case KERNEL_TL1_SIMD: {
             /* Build LUT (included in timing — it's part of the kernel) */
             int32_t lut_size = (K / 2) * 16;
-            int8_t *lut = (int8_t *)calloc(lut_size, sizeof(int8_t));
+            int16_t *lut = (int16_t *)calloc(lut_size, sizeof(int16_t));
             tl1_build_lut(lut, quant_act, K);
 
             if (kernel == KERNEL_TL1_SCALAR) {

@@ -58,13 +58,13 @@ void tl1_pack_weights(const int8_t *weights, uint8_t *out,
  *   lut[i*16 + idx] = partial_sum(a[2i], a[2i+1], idx)
  *   where idx = (w0+1)*3 + (w1+1), entries 9-15 are zero-padded
  */
-void tl1_build_lut(int8_t *lut, const int8_t *x, int32_t K);
+void tl1_build_lut(int16_t *lut, const int8_t *x, int32_t K);
 
 /*
  * TL1 GEMV: y = W * x (scalar implementation)
  */
 void tl1_gemv_scalar(const tl1_weight_t *W,
-                     const int8_t *lut,
+                     const int16_t *lut,
                      const activation_t *x,
                      output_t *y);
 
@@ -82,7 +82,7 @@ void tl1_gemv_scalar(const tl1_weight_t *W,
  *   4. Accumulate into int16/int32
  */
 void tl1_gemv_simd(const tl1_weight_t *W,
-                   const int8_t *lut,
+                   const int16_t *lut,
                    const activation_t *x,
                    output_t *y);
 
