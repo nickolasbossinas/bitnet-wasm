@@ -122,11 +122,13 @@ int run_benchmark(int32_t M, int32_t K) {
     tl1_pack_weights(raw_weights, tl1_packed, M, K);
 
     tl1_weight_t tl1_w = {
-        .indices = tl1_packed,
-        .M       = M,
-        .K       = K,
-        .scale   = 1.0f
+        .indices     = tl1_packed,
+        .indices_col = NULL,
+        .M           = M,
+        .K           = K,
+        .scale       = 1.0f
     };
+    tl1_transpose_weights(&tl1_w);
 
     /* Output buffers */
     float *out_ref  = (float *)calloc(M, sizeof(float));
@@ -181,6 +183,7 @@ int run_benchmark(int32_t M, int32_t K) {
     free(activations);
     free(i2s_packed);
     free(tl1_packed);
+    free(tl1_w.indices_col);
     free(out_ref);
     free(out_test);
 

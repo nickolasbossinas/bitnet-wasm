@@ -50,7 +50,8 @@ typedef struct {
 
 /* Packed weight matrix for TL1 kernel */
 typedef struct {
-    uint8_t *indices;    /* 4-bit indices, 2 per byte (nibble packed) */
+    uint8_t *indices;    /* 4-bit indices, 2 per byte (nibble packed), row-major */
+    uint8_t *indices_col;/* same data in column-major layout for SIMD gather */
     int32_t  M;          /* rows */
     int32_t  K;          /* cols (must be even) */
     float    scale;

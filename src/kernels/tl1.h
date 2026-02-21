@@ -61,6 +61,14 @@ void tl1_pack_weights(const int8_t *weights, uint8_t *out,
 void tl1_build_lut(int16_t *lut, const int8_t *x, int32_t K);
 
 /*
+ * Transpose packed weight indices from row-major to column-major.
+ * Creates W->indices_col where indices_col[b * M + row] = indices[row * bpr + b].
+ * This enables single v128_load gather for 16 consecutive rows in the SIMD kernel.
+ * Call once after tl1_pack_weights, before any tl1_gemv_simd calls.
+ */
+void tl1_transpose_weights(tl1_weight_t *W);
+
+/*
  * TL1 GEMV: y = W * x (scalar implementation)
  */
 void tl1_gemv_scalar(const tl1_weight_t *W,

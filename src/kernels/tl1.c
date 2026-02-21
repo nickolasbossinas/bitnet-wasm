@@ -50,6 +50,22 @@ void tl1_pack_weights(const int8_t *weights, uint8_t *out,
     }
 }
 
+/* --- Weight Transpose (row-major → column-major) --- */
+
+void tl1_transpose_weights(tl1_weight_t *W) {
+    int32_t M = W->M;
+    int32_t num_pairs = W->K / 2;
+    int32_t bytes_per_row = (num_pairs + 1) / 2;
+
+    W->indices_col = (uint8_t *)malloc(M * bytes_per_row);
+
+    for (int32_t row = 0; row < M; row++) {
+        for (int32_t b = 0; b < bytes_per_row; b++) {
+            W->indices_col[b * M + row] = W->indices[row * bytes_per_row + b];
+        }
+    }
+}
+
 /* --- LUT Construction --- */
 
 void tl1_build_lut(int16_t *lut, const int8_t *x, int32_t K) {
@@ -161,8 +177,13 @@ void tl1_gemv_simd(const tl1_weight_t *W,
     /*
      * Column-major swizzle with pre-split LUT and int16 accumulation.
      *
+     * W->indices_col stores weights in column-major order:
+     *   indices_col[b * M + row] = indices[row * bpr + b]
+     * This lets us load 16 consecutive rows' byte b with a single
+     * wasm_v128_load instead of 16 scattered byte loads + lane inserts.
+     *
      * Inner loop per byte iteration (2 pairs, 16 rows):
-     *   1. Gather 16 packed index bytes (one per row)
+     *   1. v128_load 16 packed index bytes from column-major layout
      *   2. Extract lo/hi nibbles for even/odd pair indices
      *   3. Load pre-split lo/hi byte tables (2 loads, no deinterleave)
      *   4. swizzle × 2 for 16 lookups each
@@ -171,16 +192,13 @@ void tl1_gemv_simd(const tl1_weight_t *W,
      * Int16 accumulators flush to int32 every 64 byte iterations.
      * Overflow budget: 64 iters × 2 pairs × 254 max = 32,512 < 32,767.
      */
+    const uint8_t *col = W->indices_col;
     int32_t i;
     for (i = 0; i + 16 <= M; i += 16) {
         v128_t acc0 = simd_zero();  /* int32: rows i+0  .. i+3  */
         v128_t acc1 = simd_zero();  /* int32: rows i+4  .. i+7  */
         v128_t acc2 = simd_zero();  /* int32: rows i+8  .. i+11 */
         v128_t acc3 = simd_zero();  /* int32: rows i+12 .. i+15 */
-
-        const uint8_t *rows[16];
-        for (int32_t r = 0; r < 16; r++)
-            rows[r] = &W->indices[(i + r) * bytes_per_row];
 
         /* Two-level loop: outer chunks of 64, inner accumulates int16 */
         for (int32_t b_outer = 0; b_outer < full_bytes; b_outer += 64) {
@@ -191,13 +209,8 @@ void tl1_gemv_simd(const tl1_weight_t *W,
             v128_t acc16_hi = simd_zero();  /* int16: rows 8..15 */
 
             for (int32_t b = b_outer; b < b_end; b++) {
-                /* Gather 16 packed bytes (one per row) */
-                v128_t packed = wasm_i8x16_make(
-                    rows[0][b],  rows[1][b],  rows[2][b],  rows[3][b],
-                    rows[4][b],  rows[5][b],  rows[6][b],  rows[7][b],
-                    rows[8][b],  rows[9][b],  rows[10][b], rows[11][b],
-                    rows[12][b], rows[13][b], rows[14][b], rows[15][b]
-                );
+                /* Load 16 packed bytes from column-major layout (1 instruction) */
+                v128_t packed = wasm_v128_load(&col[b * M + i]);
 
                 /* --- Even pair (low nibble) --- */
                 v128_t idx_even = simd_extract_low_nibbles(packed);
@@ -244,12 +257,7 @@ void tl1_gemv_simd(const tl1_weight_t *W,
         /* Handle last byte if num_pairs is odd */
         if (num_pairs & 1) {
             int32_t b = full_bytes;
-            v128_t packed = wasm_i8x16_make(
-                rows[0][b],  rows[1][b],  rows[2][b],  rows[3][b],
-                rows[4][b],  rows[5][b],  rows[6][b],  rows[7][b],
-                rows[8][b],  rows[9][b],  rows[10][b], rows[11][b],
-                rows[12][b], rows[13][b], rows[14][b], rows[15][b]
-            );
+            v128_t packed = wasm_v128_load(&col[b * M + i]);
             v128_t idx_even = simd_extract_low_nibbles(packed);
             int32_t ep = b * 2;
 
