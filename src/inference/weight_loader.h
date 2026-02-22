@@ -46,6 +46,17 @@ float f16_to_f32(uint16_t h);
 void i2s_decode(const uint8_t *data, int8_t *out, int64_t n_elements);
 
 /*
+ * Decode TRIT5 packed ternary weights to int8 {-1, 0, 1}.
+ *
+ * TRIT5 encoding: 5 ternary values per byte using base-3.
+ *   Each weight: -1→0, 0→1, +1→2
+ *   byte = w0*81 + w1*27 + w2*9 + w3*3 + w4 (range 0..242)
+ *
+ * Per-tensor float32 scale appended at byte offset ceil(n_elements/5).
+ */
+void trit5_decode(const uint8_t *data, int8_t *out, int64_t n_elements);
+
+/*
  * Load all model weights from a parsed GGUF file.
  *
  * model:            pre-allocated model (config set, model_alloc called)

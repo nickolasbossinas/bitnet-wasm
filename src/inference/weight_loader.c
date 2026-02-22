@@ -90,6 +90,64 @@ void i2s_decode(const uint8_t *data, int8_t *out, int64_t n_elements) {
     }
 }
 
+/* --- TRIT5 decoder --- */
+
+/*
+ * Decode TRIT5 packed ternary weights to int8 {-1, 0, 1}.
+ *
+ * TRIT5 encoding: 5 ternary values per byte using base-3.
+ *   Each weight is mapped: -1→0, 0→1, +1→2
+ *   byte = w0*81 + w1*27 + w2*9 + w3*3 + w4
+ *   Valid byte range: 0..242 (3^5 - 1)
+ *
+ * Decoding uses a 243-entry lookup table for speed.
+ * Per-tensor float32 scale is appended at byte offset ceil(n/5).
+ */
+
+/* Static lookup table: trit5_lut[byte][0..4] = decoded weights {-1,0,+1} */
+static int8_t trit5_lut[243][5];
+static int trit5_lut_init = 0;
+
+static void trit5_init_lut(void) {
+    if (trit5_lut_init) return;
+    for (int v = 0; v < 243; v++) {
+        int tmp = v;
+        trit5_lut[v][4] = (int8_t)(tmp % 3) - 1; tmp /= 3;
+        trit5_lut[v][3] = (int8_t)(tmp % 3) - 1; tmp /= 3;
+        trit5_lut[v][2] = (int8_t)(tmp % 3) - 1; tmp /= 3;
+        trit5_lut[v][1] = (int8_t)(tmp % 3) - 1; tmp /= 3;
+        trit5_lut[v][0] = (int8_t)(tmp % 3) - 1;
+    }
+    trit5_lut_init = 1;
+}
+
+void trit5_decode(const uint8_t *data, int8_t *out, int64_t n_elements) {
+    trit5_init_lut();
+
+    int64_t n_full = n_elements / 5;
+    int64_t tail = n_elements % 5;
+
+    for (int64_t i = 0; i < n_full; i++) {
+        uint8_t byte = data[i];
+        const int8_t *lut = trit5_lut[byte];
+        out[i * 5 + 0] = lut[0];
+        out[i * 5 + 1] = lut[1];
+        out[i * 5 + 2] = lut[2];
+        out[i * 5 + 3] = lut[3];
+        out[i * 5 + 4] = lut[4];
+    }
+
+    /* Decode tail (< 5 weights in the last byte) */
+    if (tail > 0) {
+        int64_t offset = n_full * 5;
+        uint8_t byte = data[n_full];
+        const int8_t *lut = trit5_lut[byte];
+        for (int64_t j = 0; j < tail; j++) {
+            out[offset + j] = lut[j];
+        }
+    }
+}
+
 /* --- Helper: load F32 tensor --- */
 
 static float *load_f32_tensor(const gguf_context_t *gguf,
@@ -239,7 +297,7 @@ static int quantize_embedding_int8(const uint16_t *f16_data,
     return 0;
 }
 
-/* --- Helper: load I2_S ternary tensor into TL1 format --- */
+/* --- Helper: load ternary tensor (I2_S or TRIT5) into TL1 format --- */
 
 static int load_tl1_weight(tl1_weight_t *w,
                             const gguf_context_t *gguf,
@@ -251,28 +309,33 @@ static int load_tl1_weight(tl1_weight_t *w,
         fprintf(stderr, "weight_loader: tensor '%s' not found\n", name);
         return -1;
     }
-    if (t->type != GGML_TYPE_I2_S) {
-        fprintf(stderr, "weight_loader: tensor '%s' is type %s, expected I2_S\n",
+    if (t->type != GGML_TYPE_I2_S && t->type != GGML_TYPE_TRIT5) {
+        fprintf(stderr, "weight_loader: tensor '%s' is type %s, expected I2_S or TRIT5\n",
                 name, ggml_type_name(t->type));
         return -1;
     }
 
     int64_t n_elements = (int64_t)M * K;
 
-    /* Decode I2_S -> int8 ternary */
+    /* Decode packed ternary data -> int8 {-1, 0, +1} */
     int8_t *raw = (int8_t *)malloc(n_elements);
     if (!raw) return -1;
 
     const uint8_t *src = (const uint8_t *)gguf_tensor_data(gguf, t, file_data);
-    i2s_decode(src, raw, n_elements);
+    int64_t packed_bytes;
 
-    /* Read per-tensor scale factor appended after packed I2_S data.
-     * I2_S format: [ceil(n/4) bytes of packed 2-bit data] [float32 scale]
-     * The scale = max(|original_weights|) from the quantization step.
-     */
-    int64_t packed_bytes = (n_elements + 3) / 4;
-    float i2s_scale;
-    memcpy(&i2s_scale, &src[packed_bytes], sizeof(float));
+    if (t->type == GGML_TYPE_TRIT5) {
+        trit5_decode(src, raw, n_elements);
+        packed_bytes = (n_elements + 4) / 5;
+    } else {
+        i2s_decode(src, raw, n_elements);
+        packed_bytes = (n_elements + 3) / 4;
+    }
+
+    /* Read per-tensor scale factor appended after packed data.
+     * Both I2_S and TRIT5 store a float32 scale at the end. */
+    float weight_scale;
+    memcpy(&weight_scale, &src[packed_bytes], sizeof(float));
 
     /* Pack into TL1 format */
     int32_t pairs = K / 2;
@@ -281,7 +344,7 @@ static int load_tl1_weight(tl1_weight_t *w,
     w->indices_col = NULL;
     w->M = M;
     w->K = K;
-    w->scale = i2s_scale;
+    w->scale = weight_scale;
 
     if (!w->indices) {
         free(raw);
@@ -314,29 +377,55 @@ int model_load_weights(model_t *model, const gguf_context_t *gguf,
     fprintf(stderr, "weight_loader: loading %d/%d layers (dim=%d, inter=%d, kv_dim=%d)\n",
             n_layers, c->n_layers, dim, inter, kv_dim);
 
-    /* Load token embedding as raw F16, then quantize to INT8 */
+    /* Load token embedding — supports both F16 (original) and I8 (converted) */
     int64_t emb_size = (int64_t)c->vocab_size * dim;
-    model->token_embedding = load_f16_raw(gguf, file_data,
-                                           "token_embd.weight", emb_size);
-    if (!model->token_embedding) return -1;
-    fprintf(stderr, "weight_loader: loaded token_embd.weight F16 (%.1f MB)\n",
-            emb_size * 2.0f / (1024.0f * 1024.0f));
-
-    /* Quantize F16 embedding to INT8 with per-row scales.
-     * This halves logits matmul bandwidth (328 MB vs 655 MB) and enables
-     * fast int8×int8 SIMD dot products. Embedding lookup dequantizes 1 row. */
-    if (quantize_embedding_int8(model->token_embedding,
-                                 &model->emb_quantized, &model->emb_row_scales,
-                                 c->vocab_size, dim) != 0) {
-        fprintf(stderr, "weight_loader: failed to quantize embedding to INT8\n");
+    gguf_tensor_info_t *embd_tensor = gguf_find_tensor(gguf, "token_embd.weight");
+    if (!embd_tensor) {
+        fprintf(stderr, "weight_loader: token_embd.weight not found\n");
         return -1;
     }
-    /* Free F16 embedding — INT8 version replaces it for both lookup and logits */
-    free(model->token_embedding);
-    model->token_embedding = NULL;
-    fprintf(stderr, "weight_loader: quantized embedding to INT8 (%.1f MB, saved %.1f MB)\n",
-            emb_size * 1.0f / (1024.0f * 1024.0f),
-            emb_size * 1.0f / (1024.0f * 1024.0f));
+
+    if (embd_tensor->type == GGML_TYPE_I8) {
+        /* INT8 embedding (pre-quantized by convert_embedding tool) */
+        const int8_t *src = (const int8_t *)gguf_tensor_data(gguf, embd_tensor, file_data);
+        model->emb_quantized = (int8_t *)malloc(emb_size);
+        if (!model->emb_quantized) return -1;
+        memcpy(model->emb_quantized, src, emb_size);
+
+        /* Load per-row scales from separate tensor */
+        gguf_tensor_info_t *scales_tensor = gguf_find_tensor(gguf, "token_embd.scales");
+        if (!scales_tensor) {
+            fprintf(stderr, "weight_loader: token_embd.scales not found (required for I8 embedding)\n");
+            return -1;
+        }
+        const float *scales_src = (const float *)gguf_tensor_data(gguf, scales_tensor, file_data);
+        model->emb_row_scales = (float *)malloc(c->vocab_size * sizeof(float));
+        if (!model->emb_row_scales) return -1;
+        memcpy(model->emb_row_scales, scales_src, c->vocab_size * sizeof(float));
+
+        model->token_embedding = NULL;
+        fprintf(stderr, "weight_loader: loaded token_embd.weight I8 (%.1f MB) + scales\n",
+                emb_size * 1.0f / (1024.0f * 1024.0f));
+    } else {
+        /* F16 embedding (original format) — quantize to INT8 at runtime */
+        model->token_embedding = load_f16_raw(gguf, file_data,
+                                               "token_embd.weight", emb_size);
+        if (!model->token_embedding) return -1;
+        fprintf(stderr, "weight_loader: loaded token_embd.weight F16 (%.1f MB)\n",
+                emb_size * 2.0f / (1024.0f * 1024.0f));
+
+        if (quantize_embedding_int8(model->token_embedding,
+                                     &model->emb_quantized, &model->emb_row_scales,
+                                     c->vocab_size, dim) != 0) {
+            fprintf(stderr, "weight_loader: failed to quantize embedding to INT8\n");
+            return -1;
+        }
+        free(model->token_embedding);
+        model->token_embedding = NULL;
+        fprintf(stderr, "weight_loader: quantized embedding to INT8 (%.1f MB, saved %.1f MB)\n",
+                emb_size * 1.0f / (1024.0f * 1024.0f),
+                emb_size * 1.0f / (1024.0f * 1024.0f));
+    }
 
     /* Load output norm (F32) */
     model->output_norm = load_f32_tensor(gguf, file_data,

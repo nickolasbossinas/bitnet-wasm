@@ -139,6 +139,7 @@ static uint64_t tensor_type_size(int32_t type, uint64_t n_elements) {
         case GGML_TYPE_TQ1_0: return (n_elements / 256) * 54; /* 256 trits in 54 bytes */
         case GGML_TYPE_TQ2_0: return (n_elements / 256) * 66; /* 256 trits in 66 bytes */
         case GGML_TYPE_I2_S:  return (n_elements + 3) / 4;    /* 2 bits per weight, 4 per byte */
+        case GGML_TYPE_TRIT5: return (n_elements + 4) / 5;   /* 5 ternary weights per byte */
         default:
             /* For quantized types we don't handle, estimate conservatively */
             return n_elements;
@@ -364,6 +365,8 @@ const char *ggml_type_name(int32_t type) {
         case GGML_TYPE_TQ1_0: return "TQ1_0";
         case GGML_TYPE_TQ2_0: return "TQ2_0";
         case GGML_TYPE_I2_S:  return "I2_S";
+        case GGML_TYPE_TRIT5: return "TRIT5";
+        case GGML_TYPE_I8:    return "I8";
         case GGML_TYPE_I32:   return "I32";
         default:              return "unknown";
     }

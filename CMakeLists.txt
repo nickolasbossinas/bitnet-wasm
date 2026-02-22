@@ -166,4 +166,71 @@ else()
         src/test/diagnose_weights.c
     )
     target_link_libraries(diagnose_weights m)
+
+    # Entropy analysis tool
+    add_executable(entropy_analysis
+        ${KERNEL_SOURCES}
+        src/inference/gguf.c
+        src/inference/weight_loader.c
+        src/test/entropy_analysis.c
+    )
+    target_link_libraries(entropy_analysis m)
+
+    # Embedding SVD analysis tool
+    add_executable(embedding_svd
+        ${KERNEL_SOURCES}
+        src/inference/gguf.c
+        src/inference/weight_loader.c
+        src/test/embedding_svd.c
+    )
+    target_link_libraries(embedding_svd m)
+
+    # Block sparsity analysis tool
+    add_executable(block_sparsity
+        ${KERNEL_SOURCES}
+        src/inference/gguf.c
+        src/inference/weight_loader.c
+        src/test/block_sparsity.c
+    )
+    target_link_libraries(block_sparsity m)
+
+    # Codebook compression analysis tool
+    add_executable(codebook_analysis
+        src/inference/gguf.c
+        src/test/codebook_analysis.c
+    )
+    target_link_libraries(codebook_analysis m)
+
+    # Fourth code analysis tool
+    add_executable(fourth_code
+        ${KERNEL_SOURCES}
+        src/inference/gguf.c
+        src/inference/weight_loader.c
+        src/test/fourth_code.c
+    )
+    target_link_libraries(fourth_code m)
+
+    # Embedding compression analysis tool
+    add_executable(embedding_compression
+        ${KERNEL_SOURCES}
+        src/inference/gguf.c
+        src/inference/weight_loader.c
+        src/test/embedding_compression.c
+    )
+    target_link_libraries(embedding_compression m)
+
+    # GGUF embedding converter (F16 → INT8)
+    add_executable(convert_embedding
+        src/tools/convert_embedding.c
+    )
+    target_link_libraries(convert_embedding m)
+
+    # GGUF weight compressor (I2_S → TRIT5)
+    add_executable(compress_weights
+        ${KERNEL_SOURCES}
+        src/inference/gguf.c
+        src/inference/weight_loader.c
+        src/tools/compress_weights.c
+    )
+    target_link_libraries(compress_weights m)
 endif()
