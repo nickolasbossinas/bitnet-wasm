@@ -184,6 +184,16 @@
 
     <div id="status">Initializing...</div>
 
+    <!-- Cached Model -->
+    <div class="section" id="cache-section" style="display:none;">
+        <div class="section-title">Cached Model</div>
+        <div class="controls" style="align-items:center;">
+            <span id="cache-info" style="font-size:0.9rem;"></span>
+            <button id="cache-load-btn">Load from Cache</button>
+            <button id="cache-clear-btn" style="background:#21262d;border:1px solid #30363d;padding:0.4rem 0.8rem;font-size:0.8rem;">Clear</button>
+        </div>
+    </div>
+
     <!-- Model Loading -->
     <div class="section">
         <div class="section-title">Model</div>
@@ -274,7 +284,7 @@
     <pre id="stats"></pre>
 
     <script type="module">
-        import { BitNet } from './bitnet.js';
+        import { BitNet, ModelCache } from './bitnet.js';
 
         /* ---- State ---- */
         const bitnet = new BitNet();
@@ -293,6 +303,10 @@
         const benchMaxThreads = document.getElementById('bench-max-threads');
         const benchResultsEl = document.getElementById('bench-results');
         const promptEl = document.getElementById('prompt');
+        const cacheSection = document.getElementById('cache-section');
+        const cacheInfo = document.getElementById('cache-info');
+        const cacheLoadBtn = document.getElementById('cache-load-btn');
+        const cacheClearBtn = document.getElementById('cache-clear-btn');
 
         /* ---- SIMD check ---- */
         async function checkSimd() {
@@ -342,6 +356,7 @@
             }
 
             loadBtn.disabled = true;
+            cacheLoadBtn.disabled = true;
             generateBtn.disabled = true;
 
             try {
@@ -355,6 +370,7 @@
                 await bitnet.load(buffer, {
                     threads: parseInt(threadsInput.value) || 0,
                     layers: parseInt(layersInput.value) || -1,
+                    cacheKey: file.name,
                     onProgress: ({ message }) => setStatus(message, true)
                 });
 
@@ -363,10 +379,56 @@
                 benchBtn.disabled = false;
                 benchSection.style.display = '';
                 outputEl.textContent = 'Model loaded. Enter a prompt and click Generate.';
+                cacheSection.style.display = 'none';
             } catch (e) {
                 setStatus('Load failed: ' + e.message, false);
             }
             loadBtn.disabled = false;
+            cacheLoadBtn.disabled = false;
+        }
+
+        /* ---- Load from cache ---- */
+        async function loadFromCache() {
+            loadBtn.disabled = true;
+            cacheLoadBtn.disabled = true;
+            generateBtn.disabled = true;
+
+            try {
+                setStatus('Reading model from cache...', true);
+
+                const cached = await ModelCache.get();
+                if (!cached) {
+                    setStatus('Cache is empty. Please select a file.', false);
+                    cacheSection.style.display = 'none';
+                    loadBtn.disabled = false;
+                    return;
+                }
+
+                await bitnet.load(cached.buffer, {
+                    threads: parseInt(threadsInput.value) || 0,
+                    layers: parseInt(layersInput.value) || -1,
+                    cache: false,
+                    onProgress: ({ message }) => setStatus(message, true)
+                });
+
+                setStatus('Model loaded from cache. Ready to generate.', false);
+                generateBtn.disabled = false;
+                benchBtn.disabled = false;
+                benchSection.style.display = '';
+                outputEl.textContent = 'Model loaded from cache. Enter a prompt and click Generate.';
+                cacheSection.style.display = 'none';
+            } catch (e) {
+                setStatus('Load failed: ' + e.message, false);
+                loadBtn.disabled = false;
+                cacheLoadBtn.disabled = false;
+            }
+        }
+
+        /* ---- Clear cache ---- */
+        async function clearCache() {
+            await ModelCache.clear();
+            cacheSection.style.display = 'none';
+            setStatus('Cache cleared. Select a GGUF model file.', false);
         }
 
         /* ---- Generate ---- */
@@ -514,6 +576,32 @@
             setStatus('Benchmark complete.', false);
         }
 
+        /* ---- Cache status ---- */
+        function formatTimeAgo(timestamp) {
+            const seconds = Math.floor((Date.now() - timestamp) / 1000);
+            if (seconds < 60) return 'just now';
+            const minutes = Math.floor(seconds / 60);
+            if (minutes < 60) return minutes + ' min ago';
+            const hours = Math.floor(minutes / 60);
+            if (hours < 24) return hours + 'h ago';
+            const days = Math.floor(hours / 24);
+            return days + 'd ago';
+        }
+
+        async function checkCache() {
+            try {
+                const meta = await ModelCache.info();
+                if (meta) {
+                    const sizeMB = (meta.size / 1024 / 1024).toFixed(0);
+                    cacheInfo.textContent = meta.name + ' (' + sizeMB + ' MB, cached ' + formatTimeAgo(meta.cachedAt) + ')';
+                    cacheSection.style.display = '';
+                    return true;
+                }
+            } catch (e) { /* IndexedDB not available */ }
+            cacheSection.style.display = 'none';
+            return false;
+        }
+
         /* ---- Init ---- */
         async function init() {
             const simdOk = await checkSimd();
@@ -522,13 +610,22 @@
                 return;
             }
 
-            setStatus('Select a GGUF model file.', false);
+            /* Check for cached model */
+            const hasCached = await checkCache();
+            if (hasCached) {
+                setStatus('Cached model found. Click "Load from Cache" or select a new file.', false);
+            } else {
+                setStatus('Select a GGUF model file.', false);
+            }
+
             fileInput.disabled = false;
             loadBtn.disabled = false;
 
             loadBtn.onclick = loadModel;
             generateBtn.onclick = startGenerate;
             benchBtn.onclick = startBenchmark;
+            cacheLoadBtn.onclick = loadFromCache;
+            cacheClearBtn.onclick = clearCache;
         }
 
         init();

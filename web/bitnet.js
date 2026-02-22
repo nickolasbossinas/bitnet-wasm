@@ -2,7 +2,7 @@
  * BitNet.js — Integration API for BitNet WASM inference.
  *
  * Usage:
- *   import { BitNet } from './bitnet.js';
+ *   import { BitNet, ModelCache } from './bitnet.js';
  *
  *   const bitnet = new BitNet();
  *   await bitnet.load('model.gguf', { threads: 5 });
@@ -13,6 +13,86 @@
  *   console.log(result.text);
  *   bitnet.destroy();
  */
+
+/**
+ * IndexedDB model cache — stores a single GGUF model for instant reload.
+ *
+ * Metadata and buffer are stored under separate keys ('meta' and 'data')
+ * so info() can read metadata without loading the full 700+ MB buffer.
+ */
+export class ModelCache {
+    static #DB_NAME = 'bitnet-cache';
+    static #STORE = 'cache';
+
+    static #openDB() {
+        return new Promise((resolve, reject) => {
+            const req = indexedDB.open(this.#DB_NAME, 1);
+            req.onupgradeneeded = () => {
+                req.result.createObjectStore(this.#STORE);
+            };
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    /** Get cached model buffer + metadata. Returns {meta, buffer} or null. */
+    static async get() {
+        const db = await this.#openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(this.#STORE, 'readonly');
+            const store = tx.objectStore(this.#STORE);
+            const metaReq = store.get('meta');
+            const dataReq = store.get('data');
+            tx.oncomplete = () => {
+                if (metaReq.result && dataReq.result) {
+                    resolve({ meta: metaReq.result, buffer: dataReq.result });
+                } else {
+                    resolve(null);
+                }
+            };
+            tx.onerror = () => reject(tx.error);
+        });
+    }
+
+    /** Store model buffer with metadata. Replaces any existing cached model. */
+    static async put(name, buffer) {
+        const db = await this.#openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(this.#STORE, 'readwrite');
+            const store = tx.objectStore(this.#STORE);
+            store.put({ name, size: buffer.byteLength, cachedAt: Date.now() }, 'meta');
+            store.put(buffer, 'data');
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    }
+
+    /** Get metadata only (no buffer load). Returns {name, size, cachedAt} or null. */
+    static async info() {
+        try {
+            const db = await this.#openDB();
+            return new Promise((resolve, reject) => {
+                const tx = db.transaction(this.#STORE, 'readonly');
+                const req = tx.objectStore(this.#STORE).get('meta');
+                req.onsuccess = () => resolve(req.result || null);
+                req.onerror = () => reject(req.error);
+            });
+        } catch (e) {
+            return null;
+        }
+    }
+
+    /** Clear all cached data. */
+    static async clear() {
+        const db = await this.#openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(this.#STORE, 'readwrite');
+            tx.objectStore(this.#STORE).clear();
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    }
+}
 
 export class BitNet {
     #worker = null;
@@ -50,12 +130,14 @@ export class BitNet {
     get generating() { return this.#generating; }
 
     /**
-     * Load a model from a URL or ArrayBuffer.
+     * Load a model from a URL, ArrayBuffer, or cache.
      *
      * @param {string|ArrayBuffer} source  URL to fetch or raw GGUF data
      * @param {Object} [options]
      * @param {number} [options.threads=0]  Worker threads (0 = single-threaded)
      * @param {number} [options.layers=-1]  Layers to load (-1 = all)
+     * @param {boolean} [options.cache=true]  Cache model in IndexedDB after loading
+     * @param {string} [options.cacheKey]  Cache key (defaults to URL basename or 'model')
      * @param {function} [options.onProgress] Progress callback: ({phase, message, percent?})
      * @returns {Promise<Object>} Model config object
      */
@@ -67,6 +149,8 @@ export class BitNet {
         const threads = options.threads || 0;
         const layers = options.layers || -1;
         const onProgress = options.onProgress || null;
+        const enableCache = options.cache !== false;
+        let cacheKey = options.cacheKey || null;
 
         try {
         /* 1. Create worker and wait for WASM ready */
@@ -78,50 +162,79 @@ export class BitNet {
             setTimeout(() => reject(new Error('Worker init timeout')), 30000);
         });
 
-        /* 2. Fetch GGUF if source is URL */
+        /* 2. Get buffer (from URL, ArrayBuffer, or cache) */
         let buffer;
-        if (typeof source === 'string') {
-            if (onProgress) onProgress({ phase: 'download', message: 'Fetching model...' });
+        let fromCache = false;
 
-            const response = await fetch(source);
-            if (!response.ok) {
-                throw new Error(`Failed to fetch model: ${response.status} ${response.statusText}`);
+        if (typeof source === 'string') {
+            cacheKey = cacheKey || source.split('/').pop() || 'model';
+
+            /* Check cache before downloading */
+            if (enableCache) {
+                try {
+                    const cached = await ModelCache.get();
+                    if (cached && cached.meta.name === cacheKey) {
+                        buffer = cached.buffer;
+                        fromCache = true;
+                        if (onProgress) onProgress({
+                            phase: 'cache',
+                            message: `Loading from cache (${(cached.meta.size / 1024 / 1024).toFixed(0)} MB)...`
+                        });
+                    }
+                } catch (e) { /* cache miss, proceed to download */ }
             }
 
-            const contentLength = parseInt(response.headers.get('content-length') || '0', 10);
-            if (contentLength && onProgress) {
-                /* Stream with progress */
-                const reader = response.body.getReader();
-                const chunks = [];
-                let received = 0;
-                while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-                    chunks.push(value);
-                    received += value.length;
-                    onProgress({
-                        phase: 'download',
-                        message: `Downloading: ${(received / 1024 / 1024).toFixed(0)} / ${(contentLength / 1024 / 1024).toFixed(0)} MB`,
-                        percent: Math.round(received / contentLength * 100)
-                    });
+            if (!buffer) {
+                if (onProgress) onProgress({ phase: 'download', message: 'Fetching model...' });
+
+                const response = await fetch(source);
+                if (!response.ok) {
+                    throw new Error(`Failed to fetch model: ${response.status} ${response.statusText}`);
                 }
-                buffer = new Uint8Array(received);
-                let offset = 0;
-                for (const chunk of chunks) {
-                    buffer.set(chunk, offset);
-                    offset += chunk.length;
+
+                const contentLength = parseInt(response.headers.get('content-length') || '0', 10);
+                if (contentLength && onProgress) {
+                    /* Stream with progress */
+                    const reader = response.body.getReader();
+                    const chunks = [];
+                    let received = 0;
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        chunks.push(value);
+                        received += value.length;
+                        onProgress({
+                            phase: 'download',
+                            message: `Downloading: ${(received / 1024 / 1024).toFixed(0)} / ${(contentLength / 1024 / 1024).toFixed(0)} MB`,
+                            percent: Math.round(received / contentLength * 100)
+                        });
+                    }
+                    buffer = new Uint8Array(received);
+                    let offset = 0;
+                    for (const chunk of chunks) {
+                        buffer.set(chunk, offset);
+                        offset += chunk.length;
+                    }
+                    buffer = buffer.buffer;
+                } else {
+                    buffer = await response.arrayBuffer();
                 }
-                buffer = buffer.buffer;
-            } else {
-                buffer = await response.arrayBuffer();
             }
         } else if (source instanceof ArrayBuffer) {
             buffer = source;
+            cacheKey = cacheKey || 'model';
         } else {
             throw new Error('source must be a URL string or ArrayBuffer');
         }
 
-        /* 3. Transfer buffer to worker and load model */
+        /* 3. Copy buffer for caching before transfer (transfer neuters the original) */
+        let bufferForCache = null;
+        if (enableCache && !fromCache && cacheKey) {
+            if (onProgress) onProgress({ phase: 'cache', message: 'Preparing cache...' });
+            bufferForCache = buffer.slice(0);
+        }
+
+        /* 4. Transfer buffer to worker and load model */
         if (onProgress) {
             this.#onProgress = onProgress;
         }
@@ -139,7 +252,19 @@ export class BitNet {
             throw new Error(loadResult.error || 'Model load failed');
         }
 
-        /* 4. Query model config */
+        /* 5. Write to cache after successful load */
+        if (bufferForCache && cacheKey) {
+            if (onProgress) onProgress({ phase: 'cache', message: 'Caching model for next visit...' });
+            try {
+                await ModelCache.put(cacheKey, bufferForCache);
+            } catch (e) {
+                /* Cache write failure is non-fatal (e.g., quota exceeded) */
+                console.warn('Failed to cache model:', e.message);
+            }
+            bufferForCache = null;
+        }
+
+        /* 6. Query model config */
         this.#config = await new Promise((resolve) => {
             this.#onConfig = resolve;
             this.#worker.postMessage({ type: 'get_config' });
